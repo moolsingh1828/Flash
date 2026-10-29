@@ -4,7 +4,7 @@ import { Loader2, AlertCircle } from 'lucide-react';
 
 export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUpdate }) {
   const videoRef = useRef(null);
-  const [loading, setLoading] = useState(true);
+  const [buffering, setBuffering] = useState(true);
   const [hasError, setHasError] = useState(false);
 
   useEffect(() => {
@@ -47,37 +47,37 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
 
   return (
     <div className="w-full bg-black aspect-video rounded-xl overflow-hidden relative border border-darkBorder shadow-2xl flex flex-col items-center justify-center">
-      {/* Loading & Buffering State */}
-      {loading && !hasError && (
-        <div className="absolute inset-0 bg-slate-900/85 z-10 flex flex-col items-center justify-center p-6 text-center pointer-events-none">
-          <Loader2 className="animate-spin text-primary mb-3" size={38} />
-          <p className="text-slate-100 text-sm font-medium">Preparing Video Stream...</p>
+      {/* Live Buffering Spinner */}
+      {buffering && !hasError && (
+        <div className="absolute inset-0 bg-slate-900/80 z-10 flex flex-col items-center justify-center p-6 text-center pointer-events-none">
+          <Loader2 className="animate-spin text-primary mb-3" size={36} />
+          <p className="text-slate-100 text-sm font-medium">Starting Stream from Telegram...</p>
           <p className="text-slate-400 text-xs mt-1 max-w-sm">
-            Downloading media from Telegram on first play. This takes a few seconds.
+            Streaming progressively while saving to server cache.
           </p>
         </div>
       )}
 
-      {/* Error Fallback State */}
+      {/* Error Fallback */}
       {hasError && (
         <div className="absolute inset-0 bg-slate-900/95 z-20 flex flex-col items-center justify-center p-6 text-center">
           <AlertCircle className="text-red-400 mb-2" size={32} />
-          <p className="text-red-300 font-semibold mb-1 text-sm">Playback could not be initialized</p>
+          <p className="text-red-300 font-semibold mb-1 text-sm">Stream Error</p>
           <p className="text-xs text-slate-400 mb-4 max-w-md">
-            The media may still be transferring from Telegram, or the session needs refreshing.
+            Could not receive stream chunks from Telegram.
           </p>
           <div className="flex gap-3">
             <button
               onClick={() => {
                 setHasError(false);
-                setLoading(true);
+                setBuffering(true);
                 if (videoRef.current) {
                   videoRef.current.load();
                 }
               }}
               className="px-4 py-2 bg-primary hover:bg-sky-400 text-darkBg font-medium text-xs rounded-lg transition-colors"
             >
-              Retry Playback
+              Retry
             </button>
             <a
               href={streamUrl}
@@ -85,7 +85,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
               rel="noreferrer"
               className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs rounded-lg border border-slate-700 transition-colors"
             >
-              Direct Stream Link
+              Direct Link
             </a>
           </div>
         </div>
@@ -95,16 +95,18 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         ref={videoRef}
         controls
         playsInline
+        autoPlay
         className="w-full h-full"
         src={streamUrl}
-        onWaiting={() => setLoading(true)}
-        onCanPlay={() => setLoading(false)}
+        onLoadStart={() => setBuffering(true)}
+        onWaiting={() => setBuffering(true)}
+        onCanPlay={() => setBuffering(false)}
         onPlaying={() => {
-          setLoading(false);
+          setBuffering(false);
           setHasError(false);
         }}
         onError={() => {
-          setLoading(false);
+          setBuffering(false);
           setHasError(true);
         }}
       >

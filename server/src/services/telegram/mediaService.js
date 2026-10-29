@@ -5,17 +5,17 @@ import { Video } from '../../models/Video.js';
 import { User } from '../../models/User.js';
 import { logger } from '../../utils/logger.js';
 
-// Ensure media_cache directory exists outside public directory
+// Cache directory outside the public root
 const CACHE_DIR = path.join(process.cwd(), 'media_cache');
 if (!fs.existsSync(CACHE_DIR)) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
 }
 
-// In-memory download locks to prevent concurrent duplicate downloads of the same video
+// Track active background downloads to prevent duplicate downloads from Telegram
 const activeDownloads = new Map();
 
 /**
- * Streams a local cached file with full RFC 7233 HTTP Range support
+ * Serves fully cached files from disk with full HTTP 206 Range seeking
  */
 function serveLocalFile(req, res, filePath, mimeType) {
   const stat = fs.statSync(filePath);
@@ -47,10 +47,6 @@ function serveLocalFile(req, res, filePath, mimeType) {
     });
 
     file.pipe(res);
-    file.on('error', (err) => {
-      logger.error({ err }, 'Error piping file stream chunk');
-      if (!res.headersSent) res.sendStatus(500);
-    });
   } else {
     res.writeHead(200, {
       'Content-Length': fileSize,
@@ -81,7 +77,7 @@ export async function streamVideoFromTelegram(req, res, user) {
 
     const cacheFilePath = path.join(CACHE_DIR, `${video._id}.mp4`);
 
-    // 1. FAST PATH: If file is already cached on disk, stream it immediately!
+    // 1. FAST PATH: If file is already fully cached, serve it from disk instantly!
     if (fs.existsSync(cacheFilePath)) {
       const stat = fs.statSync(cacheFilePath);
       if (stat.size > 0) {
@@ -106,14 +102,7 @@ export async function streamVideoFromTelegram(req, res, user) {
       return res.status(503).json({ error: 'Telegram MTProto client is not connected' });
     }
 
-    const isAuth = await client.checkAuthorization();
-    if (!isAuth) {
-      return res.status(401).json({
-        error: 'Telegram session expired. Please re-authenticate via Telegram Import.'
-      });
-    }
-
-    // 3. Resolve channel peer and warm cache if needed
+    // 3. Resolve channel entity (warm entity cache if server recently started)
     let entity;
     const chatId = video.telegramChatId;
     const numId = chatId.startsWith('-100')
@@ -141,50 +130,73 @@ export async function streamVideoFromTelegram(req, res, user) {
       return res.status(404).json({ error: 'Media message not found or revoked on Telegram' });
     }
 
-    // 4. Download on-demand with concurrency deduplication
-    if (!activeDownloads.has(String(video._id))) {
-      logger.info(`Starting Telegram download to cache for video ${video._id}...`);
-      const tempPath = `${cacheFilePath}.tmp`;
+    const doc = message.media.document;
+    const vid = message.media.video;
+    const targetMedia = doc || vid || message.media;
 
-      const downloadPromise = client
-        .downloadMedia(message, {
-          outputFile: tempPath,
-          progressCallback: (downloaded, total) => {
-            if (total) {
-              const pct = Math.round((Number(downloaded) / Number(total)) * 100);
-              logger.info(`Caching video ${video._id}: ${pct}%`);
-            }
+    let fileSize = video.fileSize || 0;
+    if (doc?.size) fileSize = Number(doc.size);
+    else if (vid?.size) fileSize = Number(vid.size);
+
+    const mimeType = video.mimeType || doc?.mimeType || 'video/mp4';
+
+    // 4. PROGRESSIVE STREAMING: Stream directly to browser while saving to disk
+    const tempPath = `${cacheFilePath}.part`;
+    const fileWriteStream = fs.createWriteStream(tempPath, { flags: 'w' });
+
+    // Send HTTP 206 headers immediately so the browser initializes the video element
+    res.writeHead(206, {
+      'Content-Range': `bytes 0-${fileSize - 1}/${fileSize}`,
+      'Content-Length': fileSize,
+      'Content-Type': mimeType,
+      'Accept-Ranges': 'bytes',
+      'Access-Control-Allow-Origin': '*',
+      'Cross-Origin-Resource-Policy': 'cross-origin'
+    });
+
+    logger.info(`Starting progressive stream & cache for video ${video._id} (${fileSize} bytes)...`);
+
+    // Download in 256 KB slices from Telegram MTProto
+    const stream = client.iterDownload({
+      file: targetMedia,
+      requestSize: 256 * 1024
+    });
+
+    try {
+      for await (const chunk of stream) {
+        // A. Write to local cache on disk
+        fileWriteStream.write(chunk);
+
+        // B. Stream chunk directly to the browser in real-time
+        if (!res.writableEnded && !res.closed) {
+          const canContinue = res.write(chunk);
+          // Handle backpressure if browser network is slower than Telegram download
+          if (!canContinue) {
+            await new Promise((resolve) => res.once('drain', resolve));
           }
-        })
-        .then(() => {
-          if (fs.existsSync(tempPath)) {
-            fs.renameSync(tempPath, cacheFilePath);
-            logger.info(`✓ Successfully cached video ${video._id}`);
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, `Error downloading video ${video._id} from Telegram`);
-          if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-          throw err;
-        })
-        .finally(() => {
-          activeDownloads.delete(String(video._id));
-        });
+        }
+      }
 
-      activeDownloads.set(String(video._id), downloadPromise);
-    }
+      fileWriteStream.end();
 
-    // Wait for the download to finish
-    await activeDownloads.get(String(video._id));
+      // Rename .part to .mp4 once 100% complete
+      if (fs.existsSync(tempPath)) {
+        fs.renameSync(tempPath, cacheFilePath);
+        logger.info(`✓ Video ${video._id} fully cached on disk.`);
+      }
 
-    // 5. Stream the cached file to the client with full Range seeking support
-    if (fs.existsSync(cacheFilePath)) {
-      return serveLocalFile(req, res, cacheFilePath, video.mimeType);
-    } else {
-      throw new Error('Failed to cache video file from Telegram');
+      if (!res.writableEnded) {
+        res.end();
+      }
+    } catch (downloadError) {
+      fileWriteStream.end();
+      if (fs.existsSync(tempPath)) {
+        try { fs.unlinkSync(tempPath); } catch {}
+      }
+      throw downloadError;
     }
   } catch (error) {
-    logger.error({ error }, 'Error during media stream handling');
+    logger.error({ error }, 'Error during progressive media streaming');
     if (!res.headersSent) {
       res.status(500).json({ error: error.message || 'Media streaming failed' });
     } else {
