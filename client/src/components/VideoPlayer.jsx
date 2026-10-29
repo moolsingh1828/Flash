@@ -31,13 +31,17 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     };
   }, [videoId, initialPosition, onProgressUpdate]);
 
-  // Clean URL: Strip any trailing slashes and ensure /api is present without duplicates
+  // Clean URL formatting
   let rawUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
   rawUrl = rawUrl.trim().replace(/\/+$/, '');
   if (!rawUrl.endsWith('/api')) {
     rawUrl = `${rawUrl}/api`;
   }
-  const streamUrl = `${rawUrl}/videos/${videoId}/stream`;
+
+  // Get token for authenticated media streaming
+  const token = localStorage.getItem('token');
+  const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
+  const streamUrl = `${rawUrl}/videos/${videoId}/stream${tokenQuery}`;
 
   return (
     <div className="w-full bg-black aspect-video rounded-xl overflow-hidden relative border border-darkBorder shadow-2xl">
