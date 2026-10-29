@@ -1,0 +1,15 @@
+import { Router } from 'express';
+import {
+  getProgress, getRecentWatched, getVideoById, getVideos, streamVideo, updateProgress, updateVideo
+} from '../controllers/videoController.js';
+import { requireAuth } from '../middleware/auth.js';
+
+export const videoRouter = Router();
+videoRouter.use(requireAuth);
+videoRouter.get('/', getVideos);
+videoRouter.get('/recent', getRecentWatched);
+videoRouter.get('/:id', getVideoById);
+videoRouter.patch('/:id', updateVideo);
+videoRouter.get('/:id/stream', streamVideo);
+videoRouter.get('/:id/progress', getProgress);
+videoRouter.put('/:id/progress', updateProgress);
