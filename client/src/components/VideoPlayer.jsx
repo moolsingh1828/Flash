@@ -1,8 +1,9 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { api } from '../services/api';
 
 export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUpdate }) {
   const videoRef = useRef(null);
+  const [hasError, setHasError] = useState(false);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -20,7 +21,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         api.put(`/videos/${videoId}/progress`, {
           positionSeconds: current,
           completed: video.duration ? current / video.duration > 0.9 : false
-        });
+        }).catch(() => {});
         if (onProgressUpdate) onProgressUpdate(current);
       }
     };
@@ -38,13 +39,28 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     rawUrl = `${rawUrl}/api`;
   }
 
-  // Get token for authenticated media streaming
   const token = localStorage.getItem('token');
   const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
   const streamUrl = `${rawUrl}/videos/${videoId}/stream${tokenQuery}`;
 
   return (
-    <div className="w-full bg-black aspect-video rounded-xl overflow-hidden relative border border-darkBorder shadow-2xl">
+    <div className="w-full bg-black aspect-video rounded-xl overflow-hidden relative border border-darkBorder shadow-2xl flex flex-col items-center justify-center">
+      {hasError && (
+        <div className="absolute inset-0 bg-slate-900/95 z-10 flex flex-col items-center justify-center p-6 text-center">
+          <p className="text-red-400 font-semibold mb-2">Video player could not load media stream.</p>
+          <p className="text-xs text-slate-400 mb-4 max-w-md">
+            The media may still be transferring or requires an active Telegram MTProto session.
+          </p>
+          <a
+            href={streamUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="px-4 py-2 bg-primary hover:bg-sky-400 text-darkBg font-medium text-xs rounded-lg transition-colors"
+          >
+            Open Stream in New Tab
+          </a>
+        </div>
+      )}
       <video
         ref={videoRef}
         controls
@@ -52,6 +68,8 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         crossOrigin="anonymous"
         className="w-full h-full"
         src={streamUrl}
+        onError={() => setHasError(true)}
+        onPlay={() => setHasError(false)}
       >
         Your browser does not support HTML5 video streaming.
       </video>
