@@ -1,6 +1,5 @@
 import fs from 'fs';
 import path from 'path';
-import { Writable } from 'stream';
 import { getTelegramClient } from './telegramClient.js';
 import { Video } from '../../models/Video.js';
 import { User } from '../../models/User.js';
@@ -11,15 +10,20 @@ if (!fs.existsSync(CACHE_DIR)) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
 }
 
-// Track active background downloads to prevent duplicate streams
+// In-flight download deduplication map
 const activeDownloads = new Map();
 
+/**
+ * Serves video files with standard RFC 7233 HTTP 206 Range handling
+ */
 function serveLocalFile(req, res, filePath, mimeType) {
   const stat = fs.statSync(filePath);
   const fileSize = stat.size;
   const range = req.headers.range;
 
   res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Type', mimeType || 'video/mp4');
@@ -44,6 +48,9 @@ function serveLocalFile(req, res, filePath, mimeType) {
     });
 
     file.pipe(res);
+    file.on('error', () => {
+      if (!res.headersSent) res.sendStatus(500);
+    });
   } else {
     res.writeHead(200, {
       'Content-Length': fileSize,
@@ -74,12 +81,12 @@ export async function streamVideoFromTelegram(req, res, user) {
 
     const cacheFilePath = path.join(CACHE_DIR, `${video._id}.mp4`);
 
-    // 1. FAST PATH: Already cached on disk -> stream instantly
+    // 1. FAST PATH: Already cached on disk -> stream with full Range support immediately!
     if (fs.existsSync(cacheFilePath) && fs.statSync(cacheFilePath).size > 0) {
       return serveLocalFile(req, res, cacheFilePath, video.mimeType);
     }
 
-    // 2. Resolve active Telegram session
+    // 2. Resolve Telegram session
     let activeUser = user;
     if (!activeUser || !activeUser.encryptedTelegramSession) {
       activeUser = await User.findOne({ encryptedTelegramSession: { $ne: null } });
@@ -124,80 +131,54 @@ export async function streamVideoFromTelegram(req, res, user) {
       return res.status(404).json({ error: 'Media message not found or revoked on Telegram' });
     }
 
-    const doc = message.media.document;
-    const vid = message.media.video;
-    let fileSize = video.fileSize || 0;
-    if (doc?.size) fileSize = Number(doc.size);
-    else if (vid?.size) fileSize = Number(vid.size);
+    // 4. Download and cache to disk using 8 parallel workers
+    const videoKey = String(video._id);
+    if (!activeDownloads.has(videoKey)) {
+      const tempPath = `${cacheFilePath}.part`;
 
-    const mimeType = video.mimeType || doc?.mimeType || 'video/mp4';
+      // Remove any previously corrupted partial files
+      if (fs.existsSync(tempPath)) {
+        try { fs.unlinkSync(tempPath); } catch {}
+      }
 
-    // 4. Send headers so browser decodes metadata
-    const range = req.headers.range;
-    if (range) {
-      res.writeHead(206, {
-        'Content-Range': `bytes 0-${fileSize - 1}/${fileSize}`,
-        'Content-Length': fileSize,
-        'Content-Type': mimeType,
-        'Accept-Ranges': 'bytes'
-      });
-    } else {
-      res.writeHead(200, {
-        'Content-Length': fileSize,
-        'Content-Type': mimeType,
-        'Accept-Ranges': 'bytes'
-      });
+      logger.info(`Downloading video ${videoKey} from Telegram via 8 parallel workers...`);
+
+      const downloadPromise = client
+        .downloadMedia(message, {
+          outputFile: tempPath,
+          workers: 8
+        })
+        .then(() => {
+          if (fs.existsSync(tempPath) && fs.statSync(tempPath).size > 0) {
+            fs.renameSync(tempPath, cacheFilePath);
+            logger.info(`✓ Video ${videoKey} successfully cached and ready for playback.`);
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, `Error downloading video ${videoKey}`);
+          if (fs.existsSync(tempPath)) {
+            try { fs.unlinkSync(tempPath); } catch {}
+          }
+          throw err;
+        })
+        .finally(() => {
+          activeDownloads.delete(videoKey);
+        });
+
+      activeDownloads.set(videoKey, downloadPromise);
     }
 
-    // 5. Dual Stream Writer with resilient close/drain handling
-    const tempPath = `${cacheFilePath}.part`;
-    const fileWriteStream = fs.createWriteStream(tempPath, { flags: 'a' });
+    // Await download completion
+    await activeDownloads.get(videoKey);
 
-    const dualWriter = new Writable({
-      write(chunk, encoding, callback) {
-        fileWriteStream.write(chunk);
-
-        if (!res.writableEnded && !res.closed) {
-          const canContinue = res.write(chunk);
-          if (!canContinue) {
-            let handled = false;
-            const cleanup = () => {
-              if (handled) return;
-              handled = true;
-              res.removeListener('drain', onDrain);
-              res.removeListener('close', onClose);
-              callback();
-            };
-            const onDrain = () => cleanup();
-            const onClose = () => cleanup();
-
-            res.once('drain', onDrain);
-            res.once('close', onClose);
-            return;
-          }
-        }
-        callback();
-      },
-      final(callback) {
-        fileWriteStream.end();
-        if (fs.existsSync(tempPath)) {
-          fs.renameSync(tempPath, cacheFilePath);
-          logger.info(`✓ Video ${video._id} successfully cached on disk.`);
-        }
-        if (!res.writableEnded) {
-          res.end();
-        }
-        callback();
-      }
-    });
-
-    // Start streaming directly to dualWriter
-    await client.downloadMedia(message, {
-      outputFile: dualWriter,
-      workers: 1
-    });
+    // 5. Serve the clean, uncorrupted cached video file
+    if (fs.existsSync(cacheFilePath) && fs.statSync(cacheFilePath).size > 0) {
+      return serveLocalFile(req, res, cacheFilePath, video.mimeType);
+    } else {
+      throw new Error('Failed caching media file from Telegram');
+    }
   } catch (error) {
-    logger.error({ error }, 'Error during media stream piping');
+    logger.error({ error }, 'Error during media stream handling');
     if (!res.headersSent) {
       res.status(500).json({ error: error.message || 'Media streaming failed' });
     } else {

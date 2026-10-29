@@ -3,7 +3,7 @@ import { api } from '../services/api';
 import {
   Play, Pause, Volume2, VolumeX, Maximize, Minimize,
   RotateCcw, RotateCw, Subtitles, Upload,
-  Loader2, AlertCircle, PictureInPicture
+  Loader2, AlertCircle, PictureInPicture, ExternalLink
 } from 'lucide-react';
 
 export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUpdate }) {
@@ -19,7 +19,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
-  const [buffering, setBuffering] = useState(false);
+  const [buffering, setBuffering] = useState(true);
   const [hasError, setHasError] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
@@ -40,7 +40,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
   const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
   const streamUrl = `${rawUrl}/videos/${videoId}/stream${tokenQuery}`;
 
-  // Auto-hide controls
   const handleMouseMove = () => {
     setControlsVisible(true);
     if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
@@ -49,7 +48,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     }, 2800);
   };
 
-  // Safe Play / Pause toggle handling DOMException
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -242,7 +240,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [togglePlay, seekRelative, volume, playbackRate]);
 
-  // Handle Metadata & Safe Progress Resumption
+  // Metadata & Safe Progress Resumption
   const handleLoadedMetadata = () => {
     const video = videoRef.current;
     if (!video) return;
@@ -290,11 +288,11 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
       onMouseLeave={() => isPlaying && setControlsVisible(false)}
       className="w-full bg-black aspect-video rounded-xl overflow-hidden relative group select-none flex flex-col justify-end shadow-2xl border border-darkBorder"
     >
-      {/* Native Video Element */}
+      {/* 1. Native Video Element */}
       <video
         ref={videoRef}
         playsInline
-        preload="metadata"
+        preload="auto"
         className="w-full h-full object-contain cursor-pointer"
         src={streamUrl}
         onClick={togglePlay}
@@ -318,8 +316,8 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         )}
       </video>
 
-      {/* Large Center Play Button (Before first play) */}
-      {!hasStarted && !hasError && (
+      {/* 2. Initial Play Button Overlay */}
+      {!hasStarted && !hasError && !buffering && (
         <div
           onClick={togglePlay}
           className="absolute inset-0 flex items-center justify-center cursor-pointer bg-black/40 hover:bg-black/20 transition-all z-20"
@@ -330,28 +328,29 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         </div>
       )}
 
-      {/* Buffering Spinner */}
-      {buffering && hasStarted && !hasError && (
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
-          <div className="bg-black/60 p-4 rounded-full backdrop-blur-sm">
-            <Loader2 className="animate-spin text-primary" size={38} />
-          </div>
+      {/* 3. Subtle Buffering Spinner */}
+      {buffering && !hasError && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-20 bg-black/40 backdrop-blur-xs">
+          <Loader2 className="animate-spin text-primary mb-2" size={38} />
+          <span className="text-xs text-slate-300 font-medium">Buffering video from Telegram...</span>
         </div>
       )}
 
-      {/* Live Auto Subtitles Banner */}
+      {/* 4. Live Auto Subtitles Banner */}
       {autoSubtitlesEnabled && liveCaptionText && (
         <div className="absolute bottom-20 left-1/2 -translate-x-1/2 max-w-2xl px-4 py-1.5 bg-black/85 text-white text-sm md:text-base font-semibold rounded text-center pointer-events-none z-30 transition-all border border-white/10 shadow-lg">
           {liveCaptionText}
         </div>
       )}
 
-      {/* Error Fallback */}
+      {/* 5. Error & Non-Native Format Fallback */}
       {hasError && (
         <div className="absolute inset-0 bg-slate-900/95 z-40 flex flex-col items-center justify-center p-6 text-center">
-          <AlertCircle className="text-red-400 mb-2" size={32} />
-          <p className="text-red-300 font-semibold mb-1 text-sm">Media playback error</p>
-          <p className="text-xs text-slate-400 mb-4 max-w-md">Could not read stream from Telegram server.</p>
+          <AlertCircle className="text-red-400 mb-2" size={36} />
+          <h4 className="text-red-300 font-semibold mb-1 text-sm">Media Playback Notice</h4>
+          <p className="text-xs text-slate-400 mb-4 max-w-md">
+            This video may be transferring, or it was encoded as an MKV/AVI container which browsers cannot decode natively. You can open or download it below:
+          </p>
           <div className="flex gap-3">
             <button
               onClick={() => {
@@ -362,23 +361,24 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
                   togglePlay();
                 }
               }}
-              className="px-4 py-2 bg-primary hover:bg-sky-400 text-darkBg font-medium text-xs rounded-lg"
+              className="px-4 py-2 bg-primary hover:bg-sky-400 text-darkBg font-medium text-xs rounded-lg transition-colors"
             >
-              Retry
+              Retry In-Browser
             </button>
             <a
               href={streamUrl}
+              download
               target="_blank"
               rel="noreferrer"
-              className="px-4 py-2 bg-slate-800 text-slate-200 text-xs rounded-lg"
+              className="flex items-center gap-1.5 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs rounded-lg transition-colors border border-slate-700"
             >
-              Direct Link
+              <ExternalLink size={13} /> Direct Stream / VLC
             </a>
           </div>
         </div>
       )}
 
-      {/* Custom Controls Bar */}
+      {/* 6. Custom Glass Controls */}
       <div
         className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent p-4 z-30 transition-opacity duration-300 ${
           controlsVisible || !isPlaying ? 'opacity-100' : 'opacity-0 pointer-events-none'
