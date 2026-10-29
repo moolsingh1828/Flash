@@ -11,6 +11,9 @@ if (!fs.existsSync(CACHE_DIR)) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
 }
 
+// Track active background downloads to prevent duplicate streams
+const activeDownloads = new Map();
+
 function serveLocalFile(req, res, filePath, mimeType) {
   const stat = fs.statSync(filePath);
   const fileSize = stat.size;
@@ -71,7 +74,7 @@ export async function streamVideoFromTelegram(req, res, user) {
 
     const cacheFilePath = path.join(CACHE_DIR, `${video._id}.mp4`);
 
-    // 1. FAST PATH: If file is already fully cached, stream directly from disk!
+    // 1. FAST PATH: Already cached on disk -> stream instantly
     if (fs.existsSync(cacheFilePath) && fs.statSync(cacheFilePath).size > 0) {
       return serveLocalFile(req, res, cacheFilePath, video.mimeType);
     }
@@ -129,7 +132,7 @@ export async function streamVideoFromTelegram(req, res, user) {
 
     const mimeType = video.mimeType || doc?.mimeType || 'video/mp4';
 
-    // 4. Send HTTP 206 headers immediately so the video element starts decoding
+    // 4. Send headers so browser decodes metadata
     const range = req.headers.range;
     if (range) {
       res.writeHead(206, {
@@ -146,17 +149,30 @@ export async function streamVideoFromTelegram(req, res, user) {
       });
     }
 
-    // 5. Dual Stream Writer: Pipes directly to browser AND writes to cache on disk
+    // 5. Dual Stream Writer with resilient close/drain handling
     const tempPath = `${cacheFilePath}.part`;
-    const fileWriteStream = fs.createWriteStream(tempPath, { flags: 'w' });
+    const fileWriteStream = fs.createWriteStream(tempPath, { flags: 'a' });
 
     const dualWriter = new Writable({
       write(chunk, encoding, callback) {
         fileWriteStream.write(chunk);
+
         if (!res.writableEnded && !res.closed) {
           const canContinue = res.write(chunk);
           if (!canContinue) {
-            res.once('drain', callback);
+            let handled = false;
+            const cleanup = () => {
+              if (handled) return;
+              handled = true;
+              res.removeListener('drain', onDrain);
+              res.removeListener('close', onClose);
+              callback();
+            };
+            const onDrain = () => cleanup();
+            const onClose = () => cleanup();
+
+            res.once('drain', onDrain);
+            res.once('close', onClose);
             return;
           }
         }
@@ -175,10 +191,10 @@ export async function streamVideoFromTelegram(req, res, user) {
       }
     });
 
-    // Start download: Telegram pipes chunks directly to dualWriter
+    // Start streaming directly to dualWriter
     await client.downloadMedia(message, {
       outputFile: dualWriter,
-      workers: 1 // Sequential worker ensures chunks arrive in exact streamable order
+      workers: 1
     });
   } catch (error) {
     logger.error({ error }, 'Error during media stream piping');

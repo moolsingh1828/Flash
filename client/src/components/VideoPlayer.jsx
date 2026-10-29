@@ -13,12 +13,13 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
 
   // Player States
   const [isPlaying, setIsPlaying] = useState(false);
+  const [hasStarted, setHasStarted] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
-  const [buffering, setBuffering] = useState(true);
+  const [buffering, setBuffering] = useState(false);
   const [hasError, setHasError] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
@@ -39,7 +40,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
   const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
   const streamUrl = `${rawUrl}/videos/${videoId}/stream${tokenQuery}`;
 
-  // Auto-hide controls when idle
+  // Auto-hide controls
   const handleMouseMove = () => {
     setControlsVisible(true);
     if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
@@ -48,37 +49,57 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     }, 2800);
   };
 
+  // Safe Play / Pause toggle handling DOMException
   const togglePlay = useCallback(() => {
-    if (!videoRef.current) return;
-    if (videoRef.current.paused) {
-      videoRef.current.play();
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (video.paused) {
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => {
+            setIsPlaying(true);
+            setHasStarted(true);
+            setHasError(false);
+          })
+          .catch((err) => {
+            console.log('Playback paused or aborted by browser:', err.message);
+            setIsPlaying(false);
+          });
+      }
     } else {
-      videoRef.current.pause();
+      video.pause();
+      setIsPlaying(false);
     }
   }, []);
 
   const seekRelative = useCallback((seconds) => {
-    if (!videoRef.current) return;
-    videoRef.current.currentTime = Math.max(0, Math.min(videoRef.current.currentTime + seconds, duration));
+    const video = videoRef.current;
+    if (!video) return;
+    video.currentTime = Math.max(0, Math.min(video.currentTime + seconds, duration));
   }, [duration]);
 
   const handleVolumeChange = (newVol) => {
-    if (!videoRef.current) return;
+    const video = videoRef.current;
+    if (!video) return;
     const clamped = Math.max(0, Math.min(newVol, 1));
-    videoRef.current.volume = clamped;
+    video.volume = clamped;
     setVolume(clamped);
     setIsMuted(clamped === 0);
   };
 
   const toggleMute = () => {
-    if (!videoRef.current) return;
-    videoRef.current.muted = !isMuted;
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = !isMuted;
     setIsMuted(!isMuted);
   };
 
   const changeSpeed = (rate) => {
-    if (!videoRef.current) return;
-    videoRef.current.playbackRate = rate;
+    const video = videoRef.current;
+    if (!video) return;
+    video.playbackRate = rate;
     setPlaybackRate(rate);
     setShowSpeedMenu(false);
   };
@@ -95,11 +116,12 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
   };
 
   const togglePiP = async () => {
-    if (!videoRef.current) return;
+    const video = videoRef.current;
+    if (!video) return;
     if (document.pictureInPictureElement) {
       await document.exitPictureInPicture();
     } else {
-      await videoRef.current.requestPictureInPicture();
+      await video.requestPictureInPicture();
     }
   };
 
@@ -147,7 +169,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     };
   }, [autoSubtitlesEnabled, isPlaying]);
 
-  // Load External Subtitles (.srt / .vtt)
+  // Load Custom Subtitles (.srt / .vtt)
   const handleSubtitleUpload = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -220,12 +242,20 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [togglePlay, seekRelative, volume, playbackRate]);
 
-  // Watch Progress
+  // Handle Metadata & Safe Progress Resumption
+  const handleLoadedMetadata = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    setDuration(video.duration || 0);
+    if (initialPosition > 0 && initialPosition < video.duration) {
+      video.currentTime = initialPosition;
+    }
+  };
+
+  // Watch Progress Sync
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-
-    if (initialPosition > 0) video.currentTime = initialPosition;
 
     let lastSent = 0;
     const handleTimeUpdate = () => {
@@ -242,12 +272,10 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     };
 
     video.addEventListener('timeupdate', handleTimeUpdate);
-    video.addEventListener('loadedmetadata', () => setDuration(video.duration || 0));
-
     return () => {
       video.removeEventListener('timeupdate', handleTimeUpdate);
     };
-  }, [videoId, initialPosition, onProgressUpdate]);
+  }, [videoId, onProgressUpdate]);
 
   const formatTime = (secs) => {
     const m = Math.floor(secs / 60);
@@ -262,16 +290,16 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
       onMouseLeave={() => isPlaying && setControlsVisible(false)}
       className="w-full bg-black aspect-video rounded-xl overflow-hidden relative group select-none flex flex-col justify-end shadow-2xl border border-darkBorder"
     >
-      {/* 1. Video Element: Mounted immediately, streams on arrival */}
+      {/* Native Video Element */}
       <video
         ref={videoRef}
         playsInline
-        autoPlay
+        preload="metadata"
         className="w-full h-full object-contain cursor-pointer"
         src={streamUrl}
         onClick={togglePlay}
         onDoubleClick={toggleFullscreen}
-        onLoadStart={() => setBuffering(true)}
+        onLoadedMetadata={handleLoadedMetadata}
         onWaiting={() => setBuffering(true)}
         onCanPlay={() => setBuffering(false)}
         onPlaying={() => {
@@ -290,8 +318,20 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         )}
       </video>
 
-      {/* 2. YouTube-Style Minimal Buffering Spinner (Only while buffering first chunk) */}
-      {buffering && !hasError && (
+      {/* Large Center Play Button (Before first play) */}
+      {!hasStarted && !hasError && (
+        <div
+          onClick={togglePlay}
+          className="absolute inset-0 flex items-center justify-center cursor-pointer bg-black/40 hover:bg-black/20 transition-all z-20"
+        >
+          <div className="h-16 w-16 md:h-20 md:w-20 rounded-full bg-primary/90 hover:bg-primary flex items-center justify-center text-darkBg shadow-2xl hover:scale-105 transition-all">
+            <Play size={36} className="ml-1" />
+          </div>
+        </div>
+      )}
+
+      {/* Buffering Spinner */}
+      {buffering && hasStarted && !hasError && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
           <div className="bg-black/60 p-4 rounded-full backdrop-blur-sm">
             <Loader2 className="animate-spin text-primary" size={38} />
@@ -299,14 +339,14 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         </div>
       )}
 
-      {/* 3. Live Auto Subtitles Banner */}
+      {/* Live Auto Subtitles Banner */}
       {autoSubtitlesEnabled && liveCaptionText && (
         <div className="absolute bottom-20 left-1/2 -translate-x-1/2 max-w-2xl px-4 py-1.5 bg-black/85 text-white text-sm md:text-base font-semibold rounded text-center pointer-events-none z-30 transition-all border border-white/10 shadow-lg">
           {liveCaptionText}
         </div>
       )}
 
-      {/* 4. Error Fallback */}
+      {/* Error Fallback */}
       {hasError && (
         <div className="absolute inset-0 bg-slate-900/95 z-40 flex flex-col items-center justify-center p-6 text-center">
           <AlertCircle className="text-red-400 mb-2" size={32} />
@@ -319,6 +359,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
                 setBuffering(true);
                 if (videoRef.current) {
                   videoRef.current.load();
+                  togglePlay();
                 }
               }}
               className="px-4 py-2 bg-primary hover:bg-sky-400 text-darkBg font-medium text-xs rounded-lg"
@@ -337,10 +378,10 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         </div>
       )}
 
-      {/* 5. Custom Controls Bar */}
+      {/* Custom Controls Bar */}
       <div
         className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent p-4 z-30 transition-opacity duration-300 ${
-          controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          controlsVisible || !isPlaying ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       >
         {/* Scrubber */}
