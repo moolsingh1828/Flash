@@ -1,13 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../services/api';
-import { DownloadCloud, CheckCircle, RefreshCw } from 'lucide-react';
+import { DownloadCloud, CheckCircle, RefreshCw, LogOut } from 'lucide-react';
 
 export default function TelegramImport() {
   const [status, setStatus] = useState(null);
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
-  const [step, setStep] = useState('phone');
+  const [step, setStep] = useState('phone'); // 'phone' | 'code' | '2fa' | 'ready'
   const [channels, setChannels] = useState([]);
   const [activeJob, setActiveJob] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -19,6 +19,8 @@ export default function TelegramImport() {
       if (res.data.connected) {
         setStep('ready');
         loadChannels();
+      } else {
+        setStep('phone');
       }
     } catch (err) {
       console.error(err);
@@ -34,7 +36,9 @@ export default function TelegramImport() {
     }
   }
 
-  useEffect(() => { checkStatus(); }, []);
+  useEffect(() => {
+    checkStatus();
+  }, []);
 
   async function handleSendCode(e) {
     e.preventDefault();
@@ -54,8 +58,9 @@ export default function TelegramImport() {
     setLoading(true);
     try {
       const res = await api.post('/telegram/auth/verify', { code });
-      if (res.data.requires2FA) setStep('2fa');
-      else {
+      if (res.data.requires2FA) {
+        setStep('2fa');
+      } else {
         setStep('ready');
         checkStatus();
       }
@@ -80,13 +85,29 @@ export default function TelegramImport() {
     }
   }
 
+  async function handleUnlinkAccount() {
+    if (!confirm('Do you want to unlink this Telegram account and connect a new one?')) return;
+    try {
+      await api.post('/telegram/disconnect');
+      setStatus({ connected: false, phone: null });
+      setPhone('');
+      setCode('');
+      setPassword('');
+      setStep('phone');
+      setChannels([]);
+      alert('Account unlinked. You can now enter your new Telegram phone number.');
+    } catch {
+      alert('Failed unlinking Telegram account');
+    }
+  }
+
   async function startImport(channelId) {
     try {
       const res = await api.post('/telegram/import', { channelId });
       setActiveJob({ id: res.data.jobId, messagesScanned: 0, videosImported: 0, status: 'running' });
       pollJob(res.data.jobId);
-    } catch (err) {
-      alert('Failed starting import task');
+    } catch {
+      alert('Failed starting channel import');
     }
   }
 
@@ -95,7 +116,9 @@ export default function TelegramImport() {
       try {
         const res = await api.get(`/telegram/import/status/${jobId}`);
         setActiveJob(res.data);
-        if (res.data.status === 'completed' || res.data.status === 'failed') clearInterval(interval);
+        if (res.data.status === 'completed' || res.data.status === 'failed') {
+          clearInterval(interval);
+        }
       } catch {
         clearInterval(interval);
       }
@@ -106,7 +129,7 @@ export default function TelegramImport() {
     <div className="space-y-6 max-w-4xl mx-auto">
       <div>
         <h1 className="text-2xl font-bold text-slate-100">Telegram Channel Importer</h1>
-        <p className="text-slate-400 text-sm mt-1">Authenticate session securely and import course video metadata</p>
+        <p className="text-slate-400 text-sm mt-1">Connect or switch authorized Telegram accounts</p>
       </div>
 
       {step !== 'ready' ? (
@@ -129,7 +152,7 @@ export default function TelegramImport() {
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full bg-primary hover:bg-sky-400 text-darkBg font-medium py-2 rounded-lg text-sm"
+                className="w-full bg-primary hover:bg-sky-400 text-darkBg font-medium py-2 rounded-lg text-sm transition-colors"
               >
                 {loading ? 'Sending Request...' : 'Send Telegram Code'}
               </button>
@@ -139,7 +162,7 @@ export default function TelegramImport() {
           {step === 'code' && (
             <form onSubmit={handleVerifyCode} className="space-y-4">
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">Verification Code</label>
+                <label className="block text-xs font-medium text-slate-400 mb-1">5-Digit Telegram Code</label>
                 <input
                   type="text"
                   required
@@ -152,7 +175,7 @@ export default function TelegramImport() {
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full bg-primary hover:bg-sky-400 text-darkBg font-medium py-2 rounded-lg text-sm"
+                className="w-full bg-primary hover:bg-sky-400 text-darkBg font-medium py-2 rounded-lg text-sm transition-colors"
               >
                 {loading ? 'Validating Code...' : 'Verify Code'}
               </button>
@@ -174,7 +197,7 @@ export default function TelegramImport() {
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full bg-primary hover:bg-sky-400 text-darkBg font-medium py-2 rounded-lg text-sm"
+                className="w-full bg-primary hover:bg-sky-400 text-darkBg font-medium py-2 rounded-lg text-sm transition-colors"
               >
                 {loading ? 'Verifying...' : 'Submit 2FA Password'}
               </button>
@@ -183,6 +206,7 @@ export default function TelegramImport() {
         </div>
       ) : (
         <div className="space-y-6">
+          {/* Active Session & Account Switcher Banner */}
           <div className="bg-darkCard border border-darkBorder p-5 rounded-xl flex items-center justify-between">
             <div className="flex items-center gap-3">
               <CheckCircle className="text-emerald-400" size={20} />
@@ -191,19 +215,27 @@ export default function TelegramImport() {
                 <p className="text-xs text-slate-400">Telegram MTProto Authorized Session</p>
               </div>
             </div>
-            <button
-              onClick={loadChannels}
-              className="flex items-center gap-2 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-1.5 rounded-lg"
-            >
-              <RefreshCw size={14} /> Refresh Channels
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={loadChannels}
+                className="flex items-center gap-1.5 text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-1.5 rounded-lg transition-colors"
+              >
+                <RefreshCw size={13} /> Refresh Channels
+              </button>
+              <button
+                onClick={handleUnlinkAccount}
+                className="flex items-center gap-1.5 text-xs bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 px-3 py-1.5 rounded-lg transition-colors"
+              >
+                <LogOut size={13} /> Switch / Unlink Account
+              </button>
+            </div>
           </div>
 
           {activeJob && (
             <div className="bg-darkCard border border-primary/30 p-5 rounded-xl space-y-3">
               <div className="flex justify-between items-center">
                 <span className="font-medium text-sm text-slate-100">
-                  Import Job Status: <span className="text-primary uppercase text-xs">{activeJob.status}</span>
+                  Import Status: <span className="text-primary uppercase text-xs">{activeJob.status}</span>
                 </span>
                 <span className="text-xs text-slate-400 font-mono">Job: {activeJob._id || activeJob.id}</span>
               </div>
@@ -237,7 +269,7 @@ export default function TelegramImport() {
                   </div>
                   <button
                     onClick={() => startImport(chan.id)}
-                    className="flex items-center gap-1.5 bg-primary hover:bg-sky-400 text-darkBg font-medium text-xs px-3 py-1.5 rounded-lg"
+                    className="flex items-center gap-1.5 bg-primary hover:bg-sky-400 text-darkBg font-medium text-xs px-3 py-1.5 rounded-lg transition-colors"
                   >
                     <DownloadCloud size={14} /> Import Channel
                   </button>

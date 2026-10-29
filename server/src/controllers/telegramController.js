@@ -160,8 +160,16 @@ export async function disconnect(req, res, next) {
     req.user.encryptedTelegramSession = null;
     req.user.telegramPhoneNumber = null;
     await req.user.save();
+
+    // Tear down MTProto client instance
     disconnectActiveClient();
-    res.json({ message: 'Telegram account disconnected' });
+
+    // Reset pending login states
+    pendingClient = null;
+    phoneCodeHash = null;
+    loginPhoneNumber = null;
+
+    res.json({ message: 'Telegram account unlinked successfully. You can now link a new account.' });
   } catch (err) {
     next(err);
   }

@@ -1,22 +1,244 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { api } from '../services/api';
-import { Loader2, AlertCircle } from 'lucide-react';
+import {
+  Play, Pause, Volume2, VolumeX, Maximize, Minimize,
+  RotateCcw, RotateCw, Subtitles, Upload, Settings,
+  Loader2, AlertCircle, PictureInPicture
+} from 'lucide-react';
 
 export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUpdate }) {
+  const containerRef = useRef(null);
   const videoRef = useRef(null);
+  const recognitionRef = useRef(null);
+
+  // Player State
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [volume, setVolume] = useState(1);
+  const [isMuted, setIsMuted] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
   const [buffering, setBuffering] = useState(true);
   const [hasError, setHasError] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const [showSpeedMenu, setShowSpeedMenu] = useState(false);
 
+  // Subtitle States
+  const [autoSubtitlesEnabled, setAutoSubtitlesEnabled] = useState(false);
+  const [liveCaptionText, setLiveCaptionText] = useState('');
+  const [customSubtitleTrack, setCustomSubtitleTrack] = useState(null);
+
+  const controlsTimeoutRef = useRef(null);
+
+  // Clean URL formatting
+  let rawUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+  rawUrl = rawUrl.trim().replace(/\/+$/, '');
+  if (!rawUrl.endsWith('/api')) rawUrl = `${rawUrl}/api`;
+  const token = localStorage.getItem('token');
+  const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
+  const streamUrl = `${rawUrl}/videos/${videoId}/stream${tokenQuery}`;
+
+  // Auto-hide controls on mouse idle
+  const handleMouseMove = () => {
+    setControlsVisible(true);
+    if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+    controlsTimeoutRef.current = setTimeout(() => {
+      if (isPlaying) setControlsVisible(false);
+    }, 2800);
+  };
+
+  // Play / Pause toggle
+  const togglePlay = useCallback(() => {
+    if (!videoRef.current) return;
+    if (videoRef.current.paused) {
+      videoRef.current.play();
+    } else {
+      videoRef.current.pause();
+    }
+  }, []);
+
+  // Seeking
+  const seekRelative = useCallback((seconds) => {
+    if (!videoRef.current) return;
+    videoRef.current.currentTime = Math.max(0, Math.min(videoRef.current.currentTime + seconds, duration));
+  }, [duration]);
+
+  // Volume
+  const handleVolumeChange = (newVol) => {
+    if (!videoRef.current) return;
+    const clamped = Math.max(0, Math.min(newVol, 1));
+    videoRef.current.volume = clamped;
+    setVolume(clamped);
+    setIsMuted(clamped === 0);
+  };
+
+  const toggleMute = () => {
+    if (!videoRef.current) return;
+    videoRef.current.muted = !isMuted;
+    setIsMuted(!isMuted);
+  };
+
+  // Speed
+  const changeSpeed = (rate) => {
+    if (!videoRef.current) return;
+    videoRef.current.playbackRate = rate;
+    setPlaybackRate(rate);
+    setShowSpeedMenu(false);
+  };
+
+  // Fullscreen
+  const toggleFullscreen = () => {
+    if (!containerRef.current) return;
+    if (!document.fullscreenElement) {
+      containerRef.current.requestFullscreen().catch(() => {});
+      setIsFullscreen(true);
+    } else {
+      document.exitFullscreen().catch(() => {});
+      setIsFullscreen(false);
+    }
+  };
+
+  // Picture in Picture
+  const togglePiP = async () => {
+    if (!videoRef.current) return;
+    if (document.pictureInPictureElement) {
+      await document.exitPictureInPicture();
+    } else {
+      await videoRef.current.requestPictureInPicture();
+    }
+  };
+
+  // Web Speech API: Auto English Live Captions
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    if (autoSubtitlesEnabled && isPlaying) {
+      try {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+
+        recognition.onresult = (event) => {
+          let text = '';
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            text += event.results[i][0].transcript;
+          }
+          setLiveCaptionText(text);
+        };
+
+        recognition.onerror = () => {};
+        recognition.onend = () => {
+          if (autoSubtitlesEnabled && isPlaying) {
+            try { recognition.start(); } catch {}
+          }
+        };
+
+        recognition.start();
+        recognitionRef.current = recognition;
+      } catch {}
+    } else {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch {}
+        recognitionRef.current = null;
+      }
+      setLiveCaptionText('');
+    }
+
+    return () => {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch {}
+      }
+    };
+  }, [autoSubtitlesEnabled, isPlaying]);
+
+  // Load Custom External Subtitle file (.srt or .vtt)
+  const handleSubtitleUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      let content = event.target?.result;
+      // Convert SRT to WebVTT format if needed
+      if (file.name.endsWith('.srt')) {
+        content = 'WEBVTT\n\n' + content.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+      }
+      const blob = new Blob([content], { type: 'text/vtt' });
+      setCustomSubtitleTrack(URL.createObjectURL(blob));
+    };
+    reader.readAsText(file);
+  };
+
+  // PotPlayer & YouTube Keyboard Shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Don't trigger if typing in an input
+      if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
+
+      switch (e.key.toLowerCase()) {
+        case ' ':
+        case 'k':
+          e.preventDefault();
+          togglePlay();
+          break;
+        case 'j':
+        case 'arrowleft':
+          e.preventDefault();
+          seekRelative(-10);
+          break;
+        case 'l':
+        case 'arrowright':
+          e.preventDefault();
+          seekRelative(10);
+          break;
+        case 'arrowup':
+          e.preventDefault();
+          handleVolumeChange(volume + 0.05);
+          break;
+        case 'arrowdown':
+          e.preventDefault();
+          handleVolumeChange(volume - 0.05);
+          break;
+        case 'm':
+          toggleMute();
+          break;
+        case 'f':
+          toggleFullscreen();
+          break;
+        case 'p':
+          togglePiP();
+          break;
+        case 'c':
+          setAutoSubtitlesEnabled((prev) => !prev);
+          break;
+        case '[': // PotPlayer slower
+          changeSpeed(Math.max(0.5, playbackRate - 0.25));
+          break;
+        case ']': // PotPlayer faster
+          changeSpeed(Math.min(2.0, playbackRate + 0.25));
+          break;
+        default:
+          break;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [togglePlay, seekRelative, volume, playbackRate]);
+
+  // Restore Watch Progress
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
-    if (initialPosition > 0) {
-      video.currentTime = initialPosition;
-    }
+    if (initialPosition > 0) video.currentTime = initialPosition;
 
     let lastSent = 0;
     const handleTimeUpdate = () => {
+      setCurrentTime(video.currentTime);
       const current = Math.floor(video.currentTime);
       if (current - lastSent >= 5) {
         lastSent = current;
@@ -29,53 +251,82 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     };
 
     video.addEventListener('timeupdate', handleTimeUpdate);
+    video.addEventListener('loadedmetadata', () => setDuration(video.duration || 0));
+
     return () => {
       video.removeEventListener('timeupdate', handleTimeUpdate);
     };
   }, [videoId, initialPosition, onProgressUpdate]);
 
-  // Clean URL formatting
-  let rawUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
-  rawUrl = rawUrl.trim().replace(/\/+$/, '');
-  if (!rawUrl.endsWith('/api')) {
-    rawUrl = `${rawUrl}/api`;
-  }
-
-  const token = localStorage.getItem('token');
-  const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
-  const streamUrl = `${rawUrl}/videos/${videoId}/stream${tokenQuery}`;
+  const formatTime = (secs) => {
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  };
 
   return (
-    <div className="w-full bg-black aspect-video rounded-xl overflow-hidden relative border border-darkBorder shadow-2xl flex flex-col items-center justify-center">
-      {/* Live Buffering Spinner */}
+    <div
+      ref={containerRef}
+      onMouseMove={handleMouseMove}
+      onMouseLeave={() => isPlaying && setControlsVisible(false)}
+      className="w-full bg-black aspect-video rounded-xl overflow-hidden relative group select-none flex flex-col justify-end shadow-2xl border border-darkBorder"
+    >
+      {/* Native Video Element */}
+      <video
+        ref={videoRef}
+        playsInline
+        autoPlay
+        className="w-full h-full object-contain cursor-pointer"
+        src={streamUrl}
+        onClick={togglePlay}
+        onDoubleClick={toggleFullscreen}
+        onWaiting={() => setBuffering(true)}
+        onCanPlay={() => setBuffering(false)}
+        onPlaying={() => {
+          setIsPlaying(true);
+          setBuffering(false);
+          setHasError(false);
+        }}
+        onPause={() => setIsPlaying(false)}
+        onError={() => {
+          setBuffering(false);
+          setHasError(true);
+        }}
+      >
+        {customSubtitleTrack && (
+          <track kind="subtitles" src={customSubtitleTrack} srcLang="en" label="Custom Subtitles" default />
+        )}
+      </video>
+
+      {/* Live Auto English Captions Overlay */}
+      {autoSubtitlesEnabled && liveCaptionText && (
+        <div className="absolute bottom-20 left-1/2 -translate-x-1/2 max-w-2xl px-4 py-1.5 bg-black/85 text-white text-sm md:text-base font-semibold rounded text-center pointer-events-none z-30 transition-all border border-white/10 shadow-lg">
+          {liveCaptionText}
+        </div>
+      )}
+
+      {/* Buffering State */}
       {buffering && !hasError && (
-        <div className="absolute inset-0 bg-slate-900/80 z-10 flex flex-col items-center justify-center p-6 text-center pointer-events-none">
-          <Loader2 className="animate-spin text-primary mb-3" size={36} />
-          <p className="text-slate-100 text-sm font-medium">Starting Stream from Telegram...</p>
-          <p className="text-slate-400 text-xs mt-1 max-w-sm">
-            Streaming progressively while saving to server cache.
-          </p>
+        <div className="absolute inset-0 bg-slate-900/60 z-20 flex flex-col items-center justify-center pointer-events-none">
+          <Loader2 className="animate-spin text-primary mb-2" size={42} />
+          <span className="text-xs text-slate-300 font-medium">Streaming from Telegram...</span>
         </div>
       )}
 
       {/* Error Fallback */}
       {hasError && (
-        <div className="absolute inset-0 bg-slate-900/95 z-20 flex flex-col items-center justify-center p-6 text-center">
+        <div className="absolute inset-0 bg-slate-900/95 z-40 flex flex-col items-center justify-center p-6 text-center">
           <AlertCircle className="text-red-400 mb-2" size={32} />
-          <p className="text-red-300 font-semibold mb-1 text-sm">Stream Error</p>
-          <p className="text-xs text-slate-400 mb-4 max-w-md">
-            Could not receive stream chunks from Telegram.
-          </p>
+          <p className="text-red-300 font-semibold mb-1 text-sm">Media playback error</p>
+          <p className="text-xs text-slate-400 mb-4 max-w-md">Could not read stream from Telegram server.</p>
           <div className="flex gap-3">
             <button
               onClick={() => {
                 setHasError(false);
                 setBuffering(true);
-                if (videoRef.current) {
-                  videoRef.current.load();
-                }
+                videoRef.current?.load();
               }}
-              className="px-4 py-2 bg-primary hover:bg-sky-400 text-darkBg font-medium text-xs rounded-lg transition-colors"
+              className="px-4 py-2 bg-primary hover:bg-sky-400 text-darkBg font-medium text-xs rounded-lg"
             >
               Retry
             </button>
@@ -83,7 +334,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
               href={streamUrl}
               target="_blank"
               rel="noreferrer"
-              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs rounded-lg border border-slate-700 transition-colors"
+              className="px-4 py-2 bg-slate-800 text-slate-200 text-xs rounded-lg"
             >
               Direct Link
             </a>
@@ -91,27 +342,121 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         </div>
       )}
 
-      <video
-        ref={videoRef}
-        controls
-        playsInline
-        autoPlay
-        className="w-full h-full"
-        src={streamUrl}
-        onLoadStart={() => setBuffering(true)}
-        onWaiting={() => setBuffering(true)}
-        onCanPlay={() => setBuffering(false)}
-        onPlaying={() => {
-          setBuffering(false);
-          setHasError(false);
-        }}
-        onError={() => {
-          setBuffering(false);
-          setHasError(true);
-        }}
+      {/* Glassmorphic Controls Bar */}
+      <div
+        className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent p-4 z-30 transition-opacity duration-300 ${
+          controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+        }`}
       >
-        Your browser does not support HTML5 video streaming.
-      </video>
+        {/* Scrubber / Progress Bar */}
+        <div className="relative mb-3 flex items-center group/scrubber cursor-pointer">
+          <input
+            type="range"
+            min={0}
+            max={duration || 100}
+            value={currentTime}
+            onChange={(e) => {
+              const target = Number(e.target.value);
+              videoRef.current.currentTime = target;
+              setCurrentTime(target);
+            }}
+            className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-primary group-hover/scrubber:h-2.5 transition-all"
+          />
+        </div>
+
+        {/* Buttons and Toolbars */}
+        <div className="flex items-center justify-between text-slate-100 text-xs">
+          <div className="flex items-center gap-3">
+            {/* Play/Pause */}
+            <button onClick={togglePlay} className="hover:text-primary transition-colors p-1">
+              {isPlaying ? <Pause size={20} /> : <Play size={20} />}
+            </button>
+
+            {/* Jump -10s / +10s */}
+            <button onClick={() => seekRelative(-10)} title="Rewind 10s (J)" className="hover:text-primary p-1">
+              <RotateCcw size={17} />
+            </button>
+            <button onClick={() => seekRelative(10)} title="Forward 10s (L)" className="hover:text-primary p-1">
+              <RotateCw size={17} />
+            </button>
+
+            {/* Volume Control */}
+            <div className="flex items-center gap-1.5 group/vol">
+              <button onClick={toggleMute} className="hover:text-primary p-1">
+                {isMuted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
+              </button>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={isMuted ? 0 : volume}
+                onChange={(e) => handleVolumeChange(Number(e.target.value))}
+                className="w-16 h-1 bg-white/20 rounded-lg accent-primary"
+              />
+            </div>
+
+            {/* Time Display */}
+            <span className="font-mono text-slate-300 text-[11px] ml-1">
+              {formatTime(currentTime)} / {formatTime(duration)}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {/* Auto English Live Subtitles (CC) */}
+            <button
+              onClick={() => setAutoSubtitlesEnabled(!autoSubtitlesEnabled)}
+              title="Toggle Auto English Subtitles (C)"
+              className={`p-1.5 rounded transition-colors ${
+                autoSubtitlesEnabled ? 'bg-primary text-darkBg font-bold' : 'hover:text-primary text-slate-300'
+              }`}
+            >
+              <Subtitles size={17} />
+            </button>
+
+            {/* PotPlayer: Load External SRT / VTT */}
+            <label title="Load external subtitle (.srt / .vtt)" className="cursor-pointer hover:text-primary p-1.5">
+              <Upload size={16} />
+              <input type="file" accept=".srt,.vtt" onChange={handleSubtitleUpload} className="hidden" />
+            </label>
+
+            {/* Speed Selector Menu */}
+            <div className="relative">
+              <button
+                onClick={() => setShowSpeedMenu(!showSpeedMenu)}
+                className="font-medium hover:text-primary px-1.5 py-0.5 rounded border border-white/20 text-[11px]"
+              >
+                {playbackRate}x
+              </button>
+              {showSpeedMenu && (
+                <div className="absolute bottom-8 right-0 bg-darkCard border border-darkBorder rounded-lg py-1 shadow-2xl z-50 flex flex-col min-w-[70px]">
+                  {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => (
+                    <button
+                      key={rate}
+                      onClick={() => changeSpeed(rate)}
+                      className={`px-3 py-1 text-left text-xs hover:bg-slate-800 ${
+                        playbackRate === rate ? 'text-primary font-bold' : 'text-slate-300'
+                      }`}
+                    >
+                      {rate}x
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Picture-in-Picture */}
+            <button onClick={togglePiP} title="Picture in Picture (P)" className="hover:text-primary p-1">
+              <PictureInPicture size={17} />
+            </button>
+
+            {/* Fullscreen */}
+            <button onClick={toggleFullscreen} title="Fullscreen (F)" className="hover:text-primary p-1">
+              {isFullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
