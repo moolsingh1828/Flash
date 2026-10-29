@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { Writable } from 'stream';
 import { getTelegramClient } from './telegramClient.js';
 import { Video } from '../../models/Video.js';
 import { User } from '../../models/User.js';
@@ -10,28 +11,6 @@ if (!fs.existsSync(CACHE_DIR)) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
 }
 
-// In-memory progress tracking and deduplication
-export const activeDownloads = new Map();
-export const downloadProgress = new Map();
-
-/**
- * Check if video is cached or its current download progress
- */
-export function getVideoDownloadStatus(videoId) {
-  const cacheFilePath = path.join(CACHE_DIR, `${videoId}.mp4`);
-  if (fs.existsSync(cacheFilePath) && fs.statSync(cacheFilePath).size > 0) {
-    return { cached: true, downloading: false, progress: 100 };
-  }
-  if (activeDownloads.has(String(videoId))) {
-    const pct = downloadProgress.get(String(videoId)) || 0;
-    return { cached: false, downloading: true, progress: pct };
-  }
-  return { cached: false, downloading: false, progress: 0 };
-}
-
-/**
- * Serves cached video files with full RFC 7233 HTTP 206 Range seeking
- */
 function serveLocalFile(req, res, filePath, mimeType) {
   const stat = fs.statSync(filePath);
   const fileSize = stat.size;
@@ -92,7 +71,7 @@ export async function streamVideoFromTelegram(req, res, user) {
 
     const cacheFilePath = path.join(CACHE_DIR, `${video._id}.mp4`);
 
-    // 1. FAST PATH: Already cached on disk -> stream instantly!
+    // 1. FAST PATH: If file is already fully cached, stream directly from disk!
     if (fs.existsSync(cacheFilePath) && fs.statSync(cacheFilePath).size > 0) {
       return serveLocalFile(req, res, cacheFilePath, video.mimeType);
     }
@@ -142,54 +121,67 @@ export async function streamVideoFromTelegram(req, res, user) {
       return res.status(404).json({ error: 'Media message not found or revoked on Telegram' });
     }
 
-    // 4. Trigger High-Speed Parallel Download (workers: 8)
-    const videoKey = String(video._id);
-    if (!activeDownloads.has(videoKey)) {
-      const tempPath = `${cacheFilePath}.part`;
-      logger.info(`Starting high-speed download for video ${videoKey} (workers: 8)...`);
+    const doc = message.media.document;
+    const vid = message.media.video;
+    let fileSize = video.fileSize || 0;
+    if (doc?.size) fileSize = Number(doc.size);
+    else if (vid?.size) fileSize = Number(vid.size);
 
-      const downloadPromise = client
-        .downloadMedia(message, {
-          outputFile: tempPath,
-          workers: 8, // 8 parallel download workers for max speed
-          progressCallback: (downloaded, total) => {
-            if (total) {
-              const pct = Math.round((Number(downloaded) / Number(total)) * 100);
-              downloadProgress.set(videoKey, pct);
-            }
-          }
-        })
-        .then(() => {
-          if (fs.existsSync(tempPath)) {
-            fs.renameSync(tempPath, cacheFilePath);
-            logger.info(`✓ Video ${videoKey} successfully cached.`);
-          }
-        })
-        .catch((err) => {
-          logger.error({ err }, `Error downloading video ${videoKey}`);
-          if (fs.existsSync(tempPath)) {
-            try { fs.unlinkSync(tempPath); } catch {}
-          }
-          throw err;
-        })
-        .finally(() => {
-          activeDownloads.delete(videoKey);
-          downloadProgress.delete(videoKey);
-        });
+    const mimeType = video.mimeType || doc?.mimeType || 'video/mp4';
 
-      activeDownloads.set(videoKey, downloadPromise);
-    }
-
-    // Wait for the parallel download to complete (takes 2-4 seconds)
-    await activeDownloads.get(videoKey);
-
-    if (fs.existsSync(cacheFilePath)) {
-      return serveLocalFile(req, res, cacheFilePath, video.mimeType);
+    // 4. Send HTTP 206 headers immediately so the video element starts decoding
+    const range = req.headers.range;
+    if (range) {
+      res.writeHead(206, {
+        'Content-Range': `bytes 0-${fileSize - 1}/${fileSize}`,
+        'Content-Length': fileSize,
+        'Content-Type': mimeType,
+        'Accept-Ranges': 'bytes'
+      });
     } else {
-      throw new Error('Failed caching video file from Telegram');
+      res.writeHead(200, {
+        'Content-Length': fileSize,
+        'Content-Type': mimeType,
+        'Accept-Ranges': 'bytes'
+      });
     }
+
+    // 5. Dual Stream Writer: Pipes directly to browser AND writes to cache on disk
+    const tempPath = `${cacheFilePath}.part`;
+    const fileWriteStream = fs.createWriteStream(tempPath, { flags: 'w' });
+
+    const dualWriter = new Writable({
+      write(chunk, encoding, callback) {
+        fileWriteStream.write(chunk);
+        if (!res.writableEnded && !res.closed) {
+          const canContinue = res.write(chunk);
+          if (!canContinue) {
+            res.once('drain', callback);
+            return;
+          }
+        }
+        callback();
+      },
+      final(callback) {
+        fileWriteStream.end();
+        if (fs.existsSync(tempPath)) {
+          fs.renameSync(tempPath, cacheFilePath);
+          logger.info(`✓ Video ${video._id} successfully cached on disk.`);
+        }
+        if (!res.writableEnded) {
+          res.end();
+        }
+        callback();
+      }
+    });
+
+    // Start download: Telegram pipes chunks directly to dualWriter
+    await client.downloadMedia(message, {
+      outputFile: dualWriter,
+      workers: 1 // Sequential worker ensures chunks arrive in exact streamable order
+    });
   } catch (error) {
-    logger.error({ error }, 'Error during media stream handling');
+    logger.error({ error }, 'Error during media stream piping');
     if (!res.headersSent) {
       res.status(500).json({ error: error.message || 'Media streaming failed' });
     } else {
