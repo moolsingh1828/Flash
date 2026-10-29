@@ -3,6 +3,17 @@ import { Video } from '../../models/Video.js';
 import { logger } from '../../utils/logger.js';
 
 export async function streamVideoFromTelegram(req, res, user) {
+  // Set headers immediately to satisfy any browser checks
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('Accept-Ranges', 'bytes');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+
   try {
     const { id } = req.params;
     const video = await Video.findById(id);
@@ -16,21 +27,29 @@ export async function streamVideoFromTelegram(req, res, user) {
       return res.status(503).json({ error: 'Telegram MTProto client is not connected' });
     }
 
-    // Resolve channel entity with BigInt support for -100 channels
+    // Resolve channel entity with automatic cache warming if server just started
     let entity;
-    try {
-      const chatId = video.telegramChatId;
-      const numId = chatId.startsWith('-100')
+    const chatId = video.telegramChatId;
+    const numId = chatId.startsWith('-100')
+      ? BigInt(chatId)
+      : chatId.match(/^-?\d+$/)
         ? BigInt(chatId)
-        : chatId.match(/^-?\d+$/)
-          ? BigInt(chatId)
-          : chatId;
+        : chatId;
+
+    try {
       entity = await client.getEntity(numId);
     } catch {
+      // Entity not found in memory cache on cold start -> warm up cache with dialogs
       try {
-        entity = await client.getInputEntity(video.telegramChatId);
-      } catch {
-        entity = video.telegramChatId;
+        await client.getDialogs({ limit: 100 });
+        entity = await client.getEntity(numId);
+      } catch (err2) {
+        logger.error({ err2 }, 'Failed resolving channel entity after cache warming');
+        try {
+          entity = await client.getInputEntity(chatId);
+        } catch {
+          entity = chatId;
+        }
       }
     }
 
@@ -51,15 +70,11 @@ export async function streamVideoFromTelegram(req, res, user) {
     else if (vid?.size) fileSize = Number(vid.size);
 
     const mimeType = video.mimeType || doc?.mimeType || 'video/mp4';
-    const range = req.headers.range;
-
-    // Cross-origin and media streaming headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-    res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Content-Type', mimeType);
 
-    // FIX BUG: Handle requests without Range (direct link / full download) by streaming from byte 0
+    const range = req.headers.range;
+
+    // Direct streaming without Range header
     if (!range) {
       if (fileSize > 0) {
         res.setHeader('Content-Length', fileSize);
@@ -78,7 +93,7 @@ export async function streamVideoFromTelegram(req, res, user) {
       return res.end();
     }
 
-    // Handle HTTP 206 Partial Content range requests
+    // HTTP 206 Partial Content range requests
     const parts = range.replace(/bytes=/, '').split('-');
     const start = parseInt(parts[0], 10);
     const chunkSize = 1024 * 1024 * 2; // 2MB chunk window
