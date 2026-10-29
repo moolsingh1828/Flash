@@ -1,8 +1,10 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { api } from '../services/api';
+import { Loader2, AlertCircle } from 'lucide-react';
 
 export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUpdate }) {
   const videoRef = useRef(null);
+  const [loading, setLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
 
   useEffect(() => {
@@ -45,30 +47,66 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
 
   return (
     <div className="w-full bg-black aspect-video rounded-xl overflow-hidden relative border border-darkBorder shadow-2xl flex flex-col items-center justify-center">
-      {hasError && (
-        <div className="absolute inset-0 bg-slate-900/95 z-10 flex flex-col items-center justify-center p-6 text-center">
-          <p className="text-red-400 font-semibold mb-2">Video player could not load media stream.</p>
-          <p className="text-xs text-slate-400 mb-4 max-w-md">
-            The Telegram MTProto connection might be initializing. You can open the direct stream below:
+      {/* Loading & Buffering State */}
+      {loading && !hasError && (
+        <div className="absolute inset-0 bg-slate-900/85 z-10 flex flex-col items-center justify-center p-6 text-center pointer-events-none">
+          <Loader2 className="animate-spin text-primary mb-3" size={38} />
+          <p className="text-slate-100 text-sm font-medium">Preparing Video Stream...</p>
+          <p className="text-slate-400 text-xs mt-1 max-w-sm">
+            Downloading media from Telegram on first play. This takes a few seconds.
           </p>
-          <a
-            href={streamUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="px-4 py-2 bg-primary hover:bg-sky-400 text-darkBg font-medium text-xs rounded-lg transition-colors"
-          >
-            Open Stream in New Tab
-          </a>
         </div>
       )}
+
+      {/* Error Fallback State */}
+      {hasError && (
+        <div className="absolute inset-0 bg-slate-900/95 z-20 flex flex-col items-center justify-center p-6 text-center">
+          <AlertCircle className="text-red-400 mb-2" size={32} />
+          <p className="text-red-300 font-semibold mb-1 text-sm">Playback could not be initialized</p>
+          <p className="text-xs text-slate-400 mb-4 max-w-md">
+            The media may still be transferring from Telegram, or the session needs refreshing.
+          </p>
+          <div className="flex gap-3">
+            <button
+              onClick={() => {
+                setHasError(false);
+                setLoading(true);
+                if (videoRef.current) {
+                  videoRef.current.load();
+                }
+              }}
+              className="px-4 py-2 bg-primary hover:bg-sky-400 text-darkBg font-medium text-xs rounded-lg transition-colors"
+            >
+              Retry Playback
+            </button>
+            <a
+              href={streamUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs rounded-lg border border-slate-700 transition-colors"
+            >
+              Direct Stream Link
+            </a>
+          </div>
+        </div>
+      )}
+
       <video
         ref={videoRef}
         controls
         playsInline
         className="w-full h-full"
         src={streamUrl}
-        onError={() => setHasError(true)}
-        onPlay={() => setHasError(false)}
+        onWaiting={() => setLoading(true)}
+        onCanPlay={() => setLoading(false)}
+        onPlaying={() => {
+          setLoading(false);
+          setHasError(false);
+        }}
+        onError={() => {
+          setLoading(false);
+          setHasError(true);
+        }}
       >
         Your browser does not support HTML5 video streaming.
       </video>
