@@ -16,6 +16,7 @@ export const app = express();
 
 app.set('trust proxy', 1);
 
+// Configure Helmet to allow cross-origin media streaming
 app.use(
   helmet({
     contentSecurityPolicy: false,
@@ -24,6 +25,7 @@ app.use(
   })
 );
 
+// Global header: Ensure browser never blocks media or API calls across Render domains
 app.use((req, res, next) => {
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   next();
@@ -68,7 +70,7 @@ app.use('/api/courses', courseRouter);
 app.use('/api/folders', folderRouter);
 app.use('/api/videos', videoRouter);
 
-// Fallback: Also support /videos directly if /api is omitted
+// Fallback route: in case a request arrives at /videos instead of /api/videos
 app.use('/videos', videoRouter);
 
 app.use(errorHandler);

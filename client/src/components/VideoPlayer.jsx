@@ -1,78 +1,91 @@
-import React, { useRef, useEffect, useState } from 'react';
-import { api } from '../services/api';
+import jwt from 'jsonwebtoken';
+import { User } from '../models/User.js';
+import { loginSchema } from '../validators/schemas.js';
+import { ENV } from '../config/env.js';
 
-export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUpdate }) {
-  const videoRef = useRef(null);
-  const [hasError, setHasError] = useState(false);
+export async function login(req, res, next) {
+  try {
+    const data = loginSchema.parse(req.body);
+    let user = await User.findOne({ email: data.email.toLowerCase() });
 
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    if (initialPosition > 0) {
-      video.currentTime = initialPosition;
+    const userCount = await User.countDocuments();
+    if (userCount === 0) {
+      user = await User.create({ email: data.email.toLowerCase(), password: data.password });
+    } else if (!user) {
+      return res.status(401).json({ error: 'User does not exist with this email.' });
+    } else {
+      const matches = await user.comparePassword(data.password);
+      if (!matches) {
+        return res.status(401).json({ error: 'Incorrect password.' });
+      }
     }
 
-    let lastSent = 0;
-    const handleTimeUpdate = () => {
-      const current = Math.floor(video.currentTime);
-      if (current - lastSent >= 5) {
-        lastSent = current;
-        api.put(`/videos/${videoId}/progress`, {
-          positionSeconds: current,
-          completed: video.duration ? current / video.duration > 0.9 : false
-        }).catch(() => {});
-        if (onProgressUpdate) onProgressUpdate(current);
-      }
-    };
+    const token = jwt.sign({ userId: user._id }, ENV.JWT_SECRET, { expiresIn: '7d' });
+    const isProduction = process.env.NODE_ENV === 'production';
 
-    video.addEventListener('timeupdate', handleTimeUpdate);
-    return () => {
-      video.removeEventListener('timeupdate', handleTimeUpdate);
-    };
-  }, [videoId, initialPosition, onProgressUpdate]);
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: isProduction ? 'none' : 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000
+    });
 
-  // Clean URL formatting
-  let rawUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
-  rawUrl = rawUrl.trim().replace(/\/+$/, '');
-  if (!rawUrl.endsWith('/api')) {
-    rawUrl = `${rawUrl}/api`;
+    res.json({
+      message: 'Login successful',
+      token,
+      user: { id: user._id, email: user.email, hasTelegram: !!user.encryptedTelegramSession }
+    });
+  } catch (err) {
+    next(err);
   }
+}
 
-  const token = localStorage.getItem('token');
-  const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
-  const streamUrl = `${rawUrl}/videos/${videoId}/stream${tokenQuery}`;
+export async function register(req, res, next) {
+  try {
+    const data = loginSchema.parse(req.body);
+    const existing = await User.findOne({ email: data.email.toLowerCase() });
+    if (existing) {
+      return res.status(400).json({ error: 'An account with this email already exists.' });
+    }
 
-  return (
-    <div className="w-full bg-black aspect-video rounded-xl overflow-hidden relative border border-darkBorder shadow-2xl flex flex-col items-center justify-center">
-      {hasError && (
-        <div className="absolute inset-0 bg-slate-900/95 z-10 flex flex-col items-center justify-center p-6 text-center">
-          <p className="text-red-400 font-semibold mb-2">Video player could not load media stream.</p>
-          <p className="text-xs text-slate-400 mb-4 max-w-md">
-            The media may still be transferring or requires an active Telegram MTProto session.
-          </p>
-          <a
-            href={streamUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="px-4 py-2 bg-primary hover:bg-sky-400 text-darkBg font-medium text-xs rounded-lg transition-colors"
-          >
-            Open Stream in New Tab
-          </a>
-        </div>
-      )}
-      <video
-        ref={videoRef}
-        controls
-        playsInline
-        crossOrigin="anonymous"
-        className="w-full h-full"
-        src={streamUrl}
-        onError={() => setHasError(true)}
-        onPlay={() => setHasError(false)}
-      >
-        Your browser does not support HTML5 video streaming.
-      </video>
-    </div>
-  );
+    const user = await User.create({ email: data.email.toLowerCase(), password: data.password });
+    const token = jwt.sign({ userId: user._id }, ENV.JWT_SECRET, { expiresIn: '7d' });
+    const isProduction = process.env.NODE_ENV === 'production';
+
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: isProduction ? 'none' : 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000
+    });
+
+    res.status(201).json({
+      message: 'Account created successfully',
+      token,
+      user: { id: user._id, email: user.email, hasTelegram: false }
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export function logout(req, res) {
+  const isProduction = process.env.NODE_ENV === 'production';
+  res.clearCookie('token', {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'lax'
+  });
+  res.json({ message: 'Logged out successfully' });
+}
+
+export function me(req, res) {
+  res.json({
+    user: {
+      id: req.user._id,
+      email: req.user.email,
+      hasTelegram: !!req.user.encryptedTelegramSession,
+      phone: req.user.telegramPhoneNumber
+    }
+  });
 }
