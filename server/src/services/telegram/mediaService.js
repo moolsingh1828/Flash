@@ -10,13 +10,15 @@ if (!fs.existsSync(CACHE_DIR)) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
 }
 
-// Exported to prevent import crashes in videoController.js
+// In-flight download deduplication map so multiple browser range probes share the exact same download
+const activeDownloads = new Map();
+
 export function getVideoDownloadStatus(videoId) {
   const cacheFilePath = path.join(CACHE_DIR, `${videoId}.mp4`);
   if (fs.existsSync(cacheFilePath) && fs.statSync(cacheFilePath).size > 0) {
     return { cached: true, downloading: false, progress: 100 };
   }
-  return { cached: false, downloading: false, progress: 0 };
+  return { cached: false, downloading: activeDownloads.has(String(videoId)), progress: 0 };
 }
 
 function serveLocalFile(req, res, filePath, mimeType) {
@@ -49,6 +51,9 @@ function serveLocalFile(req, res, filePath, mimeType) {
     });
 
     file.pipe(res);
+    file.on('error', () => {
+      if (!res.headersSent) res.sendStatus(500);
+    });
   } else {
     res.writeHead(200, {
       'Content-Length': fileSize,
@@ -77,13 +82,11 @@ export async function streamVideoFromTelegram(req, res, user) {
       return res.status(404).json({ error: 'Video source not located in database' });
     }
 
-    // 1. FAST PATH: Already cached on disk -> stream instantly
     const cacheFilePath = path.join(CACHE_DIR, `${video._id}.mp4`);
-    if (fs.existsSync(cacheFilePath)) {
-      const stat = fs.statSync(cacheFilePath);
-      if (stat.size > 0) {
-        return serveLocalFile(req, res, cacheFilePath, video.mimeType);
-      }
+
+    // 1. FAST PATH: Already cached on disk -> stream instantly with full range seeking
+    if (fs.existsSync(cacheFilePath) && fs.statSync(cacheFilePath).size > 0) {
+      return serveLocalFile(req, res, cacheFilePath, video.mimeType);
     }
 
     // 2. Resolve active Telegram session
@@ -131,99 +134,53 @@ export async function streamVideoFromTelegram(req, res, user) {
       return res.status(404).json({ error: 'Media message not found or revoked on Telegram' });
     }
 
-    const doc = message.media.document;
-    const vid = message.media.video;
-    const targetMedia = doc || vid || message.media;
+    // 4. Maximum-Speed Parallel Download (16 Workers) with Single-Task Deduplication
+    const videoKey = String(video._id);
+    if (!activeDownloads.has(videoKey)) {
+      const tempPath = `${cacheFilePath}.part`;
 
-    let fileSize = video.fileSize || 0;
-    if (doc?.size) fileSize = Number(doc.size);
-    else if (vid?.size) fileSize = Number(vid.size);
-
-    const mimeType = video.mimeType || doc?.mimeType || 'video/mp4';
-
-    // 4. ON-DEMAND LIVE CONTINUOUS STREAMING
-    const range = req.headers.range;
-    let start = 0;
-    let end = fileSize > 0 ? fileSize - 1 : 0;
-    const maxChunkSize = 2 * 1024 * 1024; // 2MB window
-
-    if (range) {
-      const parts = range.replace(/bytes=/, '').split('-');
-      start = parseInt(parts[0], 10);
-      if (parts[1]) {
-        end = parseInt(parts[1], 10);
-      } else {
-        end = Math.min(start + maxChunkSize - 1, fileSize > 0 ? fileSize - 1 : start + maxChunkSize - 1);
+      if (fs.existsSync(tempPath)) {
+        try { fs.unlinkSync(tempPath); } catch {}
       }
+
+      logger.info(`Starting high-speed 16-worker download for video ${videoKey}...`);
+
+      const downloadPromise = client
+        .downloadMedia(message, {
+          outputFile: tempPath,
+          workers: 16 // Maximum parallel MTProto throughput
+        })
+        .then(() => {
+          if (fs.existsSync(tempPath) && fs.statSync(tempPath).size > 0) {
+            fs.renameSync(tempPath, cacheFilePath);
+            logger.info(`✓ Video ${videoKey} cached successfully on disk.`);
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, `Error downloading video ${videoKey}`);
+          if (fs.existsSync(tempPath)) {
+            try { fs.unlinkSync(tempPath); } catch {}
+          }
+          throw err;
+        })
+        .finally(() => {
+          activeDownloads.delete(videoKey);
+        });
+
+      activeDownloads.set(videoKey, downloadPromise);
+    }
+
+    // Wait for the parallel download to complete (takes only 2-4 seconds)
+    await activeDownloads.get(videoKey);
+
+    // 5. Serve the clean, uncorrupted cached video file
+    if (fs.existsSync(cacheFilePath) && fs.statSync(cacheFilePath).size > 0) {
+      return serveLocalFile(req, res, cacheFilePath, video.mimeType);
     } else {
-      end = Math.min(maxChunkSize - 1, fileSize > 0 ? fileSize - 1 : maxChunkSize - 1);
-    }
-
-    if (fileSize > 0 && (start >= fileSize || end >= fileSize)) {
-      res.status(416).setHeader('Content-Range', `bytes */${fileSize}`);
-      return res.end();
-    }
-
-    const contentLength = end - start + 1;
-
-    // Telegram MTProto offset must be aligned to 4096 bytes
-    const telegramOffset = Math.floor(start / 4096) * 4096;
-    const skipBytes = start - telegramOffset;
-    const fetchLimit = contentLength + skipBytes;
-
-    res.writeHead(range ? 206 : 200, {
-      'Content-Range': `bytes ${start}-${end}/${fileSize > 0 ? fileSize : '*'}`,
-      'Content-Length': contentLength,
-      'Content-Type': mimeType,
-      'Accept-Ranges': 'bytes',
-      'Access-Control-Allow-Origin': '*',
-      'Cross-Origin-Resource-Policy': 'cross-origin'
-    });
-
-    const stream = client.iterDownload({
-      file: targetMedia,
-      offset: BigInt(telegramOffset),
-      limit: fetchLimit,
-      requestSize: 128 * 1024
-    });
-
-    let bytesSent = 0;
-    let skipped = 0;
-
-    for await (const rawChunk of stream) {
-      if (res.writableEnded || res.closed) break;
-
-      let chunk = rawChunk;
-
-      if (skipped < skipBytes) {
-        const toSkip = Math.min(skipBytes - skipped, chunk.length);
-        chunk = chunk.subarray(toSkip);
-        skipped += toSkip;
-      }
-
-      if (chunk.length === 0) continue;
-
-      const remaining = contentLength - bytesSent;
-      if (chunk.length > remaining) {
-        chunk = chunk.subarray(0, remaining);
-      }
-
-      bytesSent += chunk.length;
-      const canContinue = res.write(chunk);
-      if (!canContinue && !res.closed) {
-        await new Promise((resolve) => res.once('drain', resolve));
-      }
-
-      if (bytesSent >= contentLength) {
-        break;
-      }
-    }
-
-    if (!res.writableEnded) {
-      res.end();
+      throw new Error('Failed caching media file from Telegram');
     }
   } catch (error) {
-    logger.error({ error }, 'Error during on-demand streaming from Telegram');
+    logger.error({ error }, 'Error during media stream handling');
     if (!res.headersSent) {
       res.status(500).json({ error: error.message || 'Media streaming failed' });
     } else {

@@ -28,7 +28,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
-  const [buffering, setBuffering] = useState(false);
+  const [buffering, setBuffering] = useState(true);
   const [hasError, setHasError] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
@@ -315,6 +315,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     const video = videoRef.current;
     if (!video) return;
     setDuration(video.duration || 0);
+    setBuffering(false);
     if (initialPosition > 0 && initialPosition < video.duration) {
       video.currentTime = initialPosition;
     }
