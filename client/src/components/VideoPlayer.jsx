@@ -361,7 +361,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
       <video
         ref={videoRef}
         playsInline
-        preload="metadata"
+        preload="auto"
         className="w-full h-full object-contain cursor-pointer"
         src={streamUrl}
         onClick={togglePlay}
@@ -427,7 +427,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
           <AlertCircle className="text-red-400 mb-2" size={36} />
           <h4 className="text-red-300 font-semibold mb-1 text-sm">Media Playback Notice</h4>
           <p className="text-xs text-slate-400 mb-4 max-w-md">
-            Could not stream video. If encoded as an MKV/AVI container, open directly via the link below:
+            Buffering from Telegram server. Click Retry or open the stream directly below:
           </p>
           <div className="flex gap-3">
             <button
