@@ -1,8 +1,9 @@
-import { TelegramClient } from 'telegram';
-import { StringSession } from 'telegram/sessions/index.js';
+import { TelegramClient, sessions } from 'telegram';
 import { ENV } from '../../config/env.js';
 import { decrypt, encrypt } from '../../utils/crypto.js';
 import { logger } from '../../utils/logger.js';
+
+const { StringSession } = sessions;
 
 let activeClientInstance = null;
 let currentSessionString = '';

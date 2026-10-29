@@ -1,11 +1,11 @@
-import { TelegramClient } from 'telegram';
-import { StringSession } from 'telegram/sessions/index.js';
+import { TelegramClient, sessions } from 'telegram';
 import { ENV } from '../config/env.js';
 import { encrypt } from '../utils/crypto.js';
 import { runChannelImport } from '../services/telegram/historyImporter.js';
 import { ImportJob } from '../models/ImportJob.js';
 import { disconnectActiveClient, getTelegramClient, saveSessionString } from '../services/telegram/telegramClient.js';
 
+const { StringSession } = sessions;
 let pendingClient = null;
 let phoneCodeHash = null;
 let loginPhoneNumber = null;
