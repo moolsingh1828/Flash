@@ -6,7 +6,6 @@ import {
   Loader2, AlertCircle, PictureInPicture, ExternalLink, Sparkles
 } from 'lucide-react';
 
-// Format seconds into WebVTT timestamp (HH:MM:SS.mmm)
 function formatVttTime(seconds) {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
@@ -52,7 +51,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
   const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
   const streamUrl = `${rawUrl}/videos/${videoId}/stream${tokenQuery}`;
 
-  // 1. Check for existing subtitles on mount
+  // Check for existing subtitles on mount
   useEffect(() => {
     let isCancelled = false;
 
@@ -62,18 +61,15 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         if (isCancelled) return;
 
         if (res.data?.subtitles && res.data.subtitles.trim().length > 10) {
-          // Attached subtitle found -> Load track
           const blob = new Blob([res.data.subtitles], { type: 'text/vtt' });
           setSubtitleTrackUrl(URL.createObjectURL(blob));
           setVttContent(res.data.subtitles);
           setIsAutoGenerating(false);
         } else {
-          // No subtitle attached -> Enable live auto-generation from audio
           setIsAutoGenerating(true);
           setVttContent('WEBVTT - Auto-Generated from Telegram Audio\n\n');
         }
-      } catch (err) {
-        console.error('Failed fetching subtitles:', err);
+      } catch {
         setIsAutoGenerating(true);
         setVttContent('WEBVTT - Auto-Generated from Telegram Audio\n\n');
       }
@@ -83,7 +79,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     return () => { isCancelled = true; };
   }, [videoId]);
 
-  // 2. Real-Time Audio-to-Subtitle Engine (Speech Recognition)
+  // Live Speech Recognition Subtitle Generator
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition || !isAutoGenerating) return;
@@ -104,14 +100,12 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
           for (let i = event.resultIndex; i < event.results.length; ++i) {
             const transcript = event.results[i][0].transcript;
             if (event.results[i].isFinal) {
-              // Finalize sentence into timestamped WebVTT cue
               const startSec = cueStartTimeRef.current;
               const endSec = videoRef.current ? videoRef.current.currentTime : startSec + 2.5;
               const newCue = `${formatVttTime(startSec)} --> ${formatVttTime(Math.max(endSec, startSec + 1))}\n${transcript.trim()}\n\n`;
 
               setVttContent((prev) => {
                 const updated = prev + newCue;
-                // Auto-save generated VTT to database
                 api.put(`/videos/${videoId}/subtitles`, { subtitles: updated }).catch(() => {});
                 return updated;
               });
@@ -125,7 +119,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
           if (interimText) setLiveCaptionText(interimText);
         };
 
-        recognition.onerror = () => {};
         recognition.onend = () => {
           if (isPlaying && isAutoGenerating && subtitlesEnabled) {
             try { recognition.start(); } catch {}
@@ -150,7 +143,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     };
   }, [isAutoGenerating, isPlaying, subtitlesEnabled, videoId]);
 
-  // 3. PotPlayer: Upload Custom Subtitle (.srt / .vtt)
   const handleSubtitleUpload = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -162,9 +154,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         content = 'WEBVTT\n\n' + content.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
       }
 
-      // Save uploaded subtitle to database so it stays forever
       await api.put(`/videos/${videoId}/subtitles`, { subtitles: content }).catch(() => {});
-
       const blob = new Blob([content], { type: 'text/vtt' });
       setSubtitleTrackUrl(URL.createObjectURL(blob));
       setVttContent(content);
@@ -174,7 +164,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     reader.readAsText(file);
   };
 
-  // 4. Download Generated Subtitles (.vtt file)
   const handleDownloadSubtitles = () => {
     if (!vttContent) return;
     const blob = new Blob([vttContent], { type: 'text/vtt' });
@@ -186,7 +175,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     URL.revokeObjectURL(url);
   };
 
-  // Controls auto-hide
   const handleMouseMove = () => {
     setControlsVisible(true);
     if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
@@ -195,7 +183,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     }, 2800);
   };
 
-  // Play / Pause toggle
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -324,7 +311,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [togglePlay, seekRelative, volume, playbackRate]);
 
-  // Handle Metadata & Safe Progress Resumption
   const handleLoadedMetadata = () => {
     const video = videoRef.current;
     if (!video) return;
@@ -334,7 +320,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     }
   };
 
-  // Watch Progress Sync
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -372,7 +357,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
       onMouseLeave={() => isPlaying && setControlsVisible(false)}
       className="w-full bg-black aspect-video rounded-xl overflow-hidden relative group select-none flex flex-col justify-end shadow-2xl border border-darkBorder"
     >
-      {/* 1. Native Video Element */}
       <video
         ref={videoRef}
         playsInline
@@ -400,7 +384,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         )}
       </video>
 
-      {/* 2. Auto-Caption Indicator Badge */}
+      {/* Auto-Caption Badge */}
       {isAutoGenerating && subtitlesEnabled && (
         <div className="absolute top-4 left-4 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 border border-primary/30 text-primary text-[11px] font-medium backdrop-blur-sm pointer-events-none">
           <Sparkles size={12} className="animate-pulse" />
@@ -408,14 +392,14 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         </div>
       )}
 
-      {/* 3. Live Auto Subtitles Banner (Speech Recognition) */}
+      {/* Live Auto Subtitles Banner */}
       {subtitlesEnabled && liveCaptionText && isAutoGenerating && (
         <div className="absolute bottom-20 left-1/2 -translate-x-1/2 max-w-2xl px-4 py-1.5 bg-black/85 text-white text-sm md:text-base font-semibold rounded text-center pointer-events-none z-30 transition-all border border-white/10 shadow-lg">
           {liveCaptionText}
         </div>
       )}
 
-      {/* 4. Center Play Button Overlay */}
+      {/* Center Play Button Overlay */}
       {!hasStarted && !hasError && !buffering && (
         <div
           onClick={togglePlay}
@@ -427,7 +411,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         </div>
       )}
 
-      {/* 5. Subtle Buffering Spinner */}
+      {/* Subtle Buffering Spinner */}
       {buffering && hasStarted && !hasError && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
           <div className="bg-black/60 p-4 rounded-full backdrop-blur-sm">
@@ -436,7 +420,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         </div>
       )}
 
-      {/* 6. Error Fallback */}
+      {/* Error Fallback */}
       {hasError && (
         <div className="absolute inset-0 bg-slate-900/95 z-40 flex flex-col items-center justify-center p-6 text-center">
           <AlertCircle className="text-red-400 mb-2" size={36} />
@@ -471,13 +455,12 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         </div>
       )}
 
-      {/* 7. Custom Controls Bar */}
+      {/* Controls Bar */}
       <div
         className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent p-4 z-30 transition-opacity duration-300 ${
           controlsVisible || !isPlaying ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
       >
-        {/* Scrubber */}
         <div className="relative mb-3 flex items-center group/scrubber cursor-pointer">
           <input
             type="range"
@@ -495,7 +478,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
           />
         </div>
 
-        {/* Buttons Toolbar */}
         <div className="flex items-center justify-between text-slate-100 text-xs">
           <div className="flex items-center gap-3">
             <button onClick={togglePlay} className="hover:text-primary transition-colors p-1">
@@ -530,7 +512,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Subtitles Toggle (CC) */}
             <button
               onClick={() => setSubtitlesEnabled(!subtitlesEnabled)}
               title="Toggle Subtitles (C)"
@@ -541,13 +522,11 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
               <Subtitles size={17} />
             </button>
 
-            {/* Upload Custom Subtitle (.srt / .vtt) */}
             <label title="Upload or Drag & Drop Subtitles (.srt / .vtt)" className="cursor-pointer hover:text-primary p-1.5">
               <Upload size={16} />
               <input type="file" accept=".srt,.vtt" onChange={handleSubtitleUpload} className="hidden" />
             </label>
 
-            {/* Download Generated WebVTT */}
             {vttContent && (
               <button
                 onClick={handleDownloadSubtitles}
@@ -558,7 +537,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
               </button>
             )}
 
-            {/* Playback Speed Menu */}
             <div className="relative">
               <button
                 onClick={() => setShowSpeedMenu(!showSpeedMenu)}

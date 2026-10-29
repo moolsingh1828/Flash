@@ -1,8 +1,7 @@
 import { Video } from '../models/Video.js';
 import { WatchProgress } from '../models/WatchProgress.js';
-import { streamVideoFromTelegram } from '../services/telegram/mediaService.js';
+import { streamVideoFromTelegram, getVideoDownloadStatus } from '../services/telegram/mediaService.js';
 import { progressUpdateSchema, videoUpdateSchema } from '../validators/schemas.js';
-import { getVideoDownloadStatus } from '../services/telegram/mediaService.js';
 
 export async function getVideos(req, res, next) {
   try {

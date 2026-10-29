@@ -10,6 +10,15 @@ if (!fs.existsSync(CACHE_DIR)) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
 }
 
+// Exported to prevent import crashes in videoController.js
+export function getVideoDownloadStatus(videoId) {
+  const cacheFilePath = path.join(CACHE_DIR, `${videoId}.mp4`);
+  if (fs.existsSync(cacheFilePath) && fs.statSync(cacheFilePath).size > 0) {
+    return { cached: true, downloading: false, progress: 100 };
+  }
+  return { cached: false, downloading: false, progress: 0 };
+}
+
 function serveLocalFile(req, res, filePath, mimeType) {
   const stat = fs.statSync(filePath);
   const fileSize = stat.size;
@@ -68,7 +77,7 @@ export async function streamVideoFromTelegram(req, res, user) {
       return res.status(404).json({ error: 'Video source not located in database' });
     }
 
-    // 1. FAST PATH: If file was already cached previously, serve from disk instantly!
+    // 1. FAST PATH: Already cached on disk -> stream instantly
     const cacheFilePath = path.join(CACHE_DIR, `${video._id}.mp4`);
     if (fs.existsSync(cacheFilePath)) {
       const stat = fs.statSync(cacheFilePath);
@@ -132,13 +141,11 @@ export async function streamVideoFromTelegram(req, res, user) {
 
     const mimeType = video.mimeType || doc?.mimeType || 'video/mp4';
 
-    // 4. ON-DEMAND LIVE STREAMING (NO WAITING FOR FULL DOWNLOAD)
+    // 4. ON-DEMAND LIVE CONTINUOUS STREAMING
     const range = req.headers.range;
     let start = 0;
     let end = fileSize > 0 ? fileSize - 1 : 0;
-
-    // Stream in continuous 2MB slices for instantaneous startup and smooth playback
-    const maxChunkSize = 2 * 1024 * 1024; // 2MB
+    const maxChunkSize = 2 * 1024 * 1024; // 2MB window
 
     if (range) {
       const parts = range.replace(/bytes=/, '').split('-');
@@ -159,7 +166,7 @@ export async function streamVideoFromTelegram(req, res, user) {
 
     const contentLength = end - start + 1;
 
-    // Telegram MTProto strictly requires offset to be divisible by 4096 bytes
+    // Telegram MTProto offset must be aligned to 4096 bytes
     const telegramOffset = Math.floor(start / 4096) * 4096;
     const skipBytes = start - telegramOffset;
     const fetchLimit = contentLength + skipBytes;
@@ -173,7 +180,6 @@ export async function streamVideoFromTelegram(req, res, user) {
       'Cross-Origin-Resource-Policy': 'cross-origin'
     });
 
-    // Stream directly from Telegram MTProto on the fly
     const stream = client.iterDownload({
       file: targetMedia,
       offset: BigInt(telegramOffset),
@@ -189,7 +195,6 @@ export async function streamVideoFromTelegram(req, res, user) {
 
       let chunk = rawChunk;
 
-      // Skip alignment bytes if offset was aligned to 4096
       if (skipped < skipBytes) {
         const toSkip = Math.min(skipBytes - skipped, chunk.length);
         chunk = chunk.subarray(toSkip);
@@ -198,7 +203,6 @@ export async function streamVideoFromTelegram(req, res, user) {
 
       if (chunk.length === 0) continue;
 
-      // Slice to exact requested contentLength
       const remaining = contentLength - bytesSent;
       if (chunk.length > remaining) {
         chunk = chunk.subarray(0, remaining);
