@@ -2,14 +2,24 @@ import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { api } from '../services/api';
 import {
   Play, Pause, Volume2, VolumeX, Maximize, Minimize,
-  RotateCcw, RotateCw, Subtitles, Upload,
-  Loader2, AlertCircle, PictureInPicture, ExternalLink
+  RotateCcw, RotateCw, Subtitles, Upload, Download,
+  Loader2, AlertCircle, PictureInPicture, ExternalLink, Sparkles
 } from 'lucide-react';
+
+// Format seconds into WebVTT timestamp (HH:MM:SS.mmm)
+function formatVttTime(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 1000);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+}
 
 export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUpdate }) {
   const containerRef = useRef(null);
   const videoRef = useRef(null);
   const recognitionRef = useRef(null);
+  const cueStartTimeRef = useRef(0);
 
   // Player States
   const [isPlaying, setIsPlaying] = useState(false);
@@ -25,10 +35,12 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
   const [controlsVisible, setControlsVisible] = useState(true);
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
 
-  // Subtitles
-  const [autoSubtitlesEnabled, setAutoSubtitlesEnabled] = useState(false);
+  // Subtitle States
+  const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
+  const [isAutoGenerating, setIsAutoGenerating] = useState(false);
   const [liveCaptionText, setLiveCaptionText] = useState('');
-  const [customSubtitleTrack, setCustomSubtitleTrack] = useState(null);
+  const [vttContent, setVttContent] = useState('');
+  const [subtitleTrackUrl, setSubtitleTrackUrl] = useState(null);
 
   const controlsTimeoutRef = useRef(null);
 
@@ -40,6 +52,141 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
   const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
   const streamUrl = `${rawUrl}/videos/${videoId}/stream${tokenQuery}`;
 
+  // 1. Check for existing subtitles on mount
+  useEffect(() => {
+    let isCancelled = false;
+
+    async function checkExistingSubtitles() {
+      try {
+        const res = await api.get(`/videos/${videoId}/subtitles`);
+        if (isCancelled) return;
+
+        if (res.data?.subtitles && res.data.subtitles.trim().length > 10) {
+          // Attached subtitle found -> Load track
+          const blob = new Blob([res.data.subtitles], { type: 'text/vtt' });
+          setSubtitleTrackUrl(URL.createObjectURL(blob));
+          setVttContent(res.data.subtitles);
+          setIsAutoGenerating(false);
+        } else {
+          // No subtitle attached -> Enable live auto-generation from audio
+          setIsAutoGenerating(true);
+          setVttContent('WEBVTT - Auto-Generated from Telegram Audio\n\n');
+        }
+      } catch (err) {
+        console.error('Failed fetching subtitles:', err);
+        setIsAutoGenerating(true);
+        setVttContent('WEBVTT - Auto-Generated from Telegram Audio\n\n');
+      }
+    }
+
+    checkExistingSubtitles();
+    return () => { isCancelled = true; };
+  }, [videoId]);
+
+  // 2. Real-Time Audio-to-Subtitle Engine (Speech Recognition)
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition || !isAutoGenerating) return;
+
+    if (isPlaying && subtitlesEnabled) {
+      try {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+
+        recognition.onstart = () => {
+          cueStartTimeRef.current = videoRef.current ? videoRef.current.currentTime : 0;
+        };
+
+        recognition.onresult = (event) => {
+          let interimText = '';
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            const transcript = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+              // Finalize sentence into timestamped WebVTT cue
+              const startSec = cueStartTimeRef.current;
+              const endSec = videoRef.current ? videoRef.current.currentTime : startSec + 2.5;
+              const newCue = `${formatVttTime(startSec)} --> ${formatVttTime(Math.max(endSec, startSec + 1))}\n${transcript.trim()}\n\n`;
+
+              setVttContent((prev) => {
+                const updated = prev + newCue;
+                // Auto-save generated VTT to database
+                api.put(`/videos/${videoId}/subtitles`, { subtitles: updated }).catch(() => {});
+                return updated;
+              });
+
+              cueStartTimeRef.current = videoRef.current ? videoRef.current.currentTime : 0;
+              setLiveCaptionText(transcript.trim());
+            } else {
+              interimText += transcript;
+            }
+          }
+          if (interimText) setLiveCaptionText(interimText);
+        };
+
+        recognition.onerror = () => {};
+        recognition.onend = () => {
+          if (isPlaying && isAutoGenerating && subtitlesEnabled) {
+            try { recognition.start(); } catch {}
+          }
+        };
+
+        recognition.start();
+        recognitionRef.current = recognition;
+      } catch {}
+    } else {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch {}
+        recognitionRef.current = null;
+      }
+      setLiveCaptionText('');
+    }
+
+    return () => {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch {}
+      }
+    };
+  }, [isAutoGenerating, isPlaying, subtitlesEnabled, videoId]);
+
+  // 3. PotPlayer: Upload Custom Subtitle (.srt / .vtt)
+  const handleSubtitleUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      let content = event.target?.result;
+      if (file.name.endsWith('.srt')) {
+        content = 'WEBVTT\n\n' + content.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+      }
+
+      // Save uploaded subtitle to database so it stays forever
+      await api.put(`/videos/${videoId}/subtitles`, { subtitles: content }).catch(() => {});
+
+      const blob = new Blob([content], { type: 'text/vtt' });
+      setSubtitleTrackUrl(URL.createObjectURL(blob));
+      setVttContent(content);
+      setIsAutoGenerating(false);
+      setLiveCaptionText('');
+    };
+    reader.readAsText(file);
+  };
+
+  // 4. Download Generated Subtitles (.vtt file)
+  const handleDownloadSubtitles = () => {
+    if (!vttContent) return;
+    const blob = new Blob([vttContent], { type: 'text/vtt' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `lesson_${videoId}_subtitles.vtt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Controls auto-hide
   const handleMouseMove = () => {
     setControlsVisible(true);
     if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
@@ -48,6 +195,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     }, 2800);
   };
 
+  // Play / Pause toggle
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -61,10 +209,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
             setHasStarted(true);
             setHasError(false);
           })
-          .catch((err) => {
-            console.log('Playback paused or aborted by browser:', err.message);
-            setIsPlaying(false);
-          });
+          .catch(() => setIsPlaying(false));
       }
     } else {
       video.pause();
@@ -123,67 +268,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     }
   };
 
-  // Web Speech API: Auto English Live Captions
-  useEffect(() => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
-
-    if (autoSubtitlesEnabled && isPlaying) {
-      try {
-        const recognition = new SpeechRecognition();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.lang = 'en-US';
-
-        recognition.onresult = (event) => {
-          let text = '';
-          for (let i = event.resultIndex; i < event.results.length; ++i) {
-            text += event.results[i][0].transcript;
-          }
-          setLiveCaptionText(text);
-        };
-
-        recognition.onend = () => {
-          if (autoSubtitlesEnabled && isPlaying) {
-            try { recognition.start(); } catch {}
-          }
-        };
-
-        recognition.start();
-        recognitionRef.current = recognition;
-      } catch {}
-    } else {
-      if (recognitionRef.current) {
-        try { recognitionRef.current.stop(); } catch {}
-        recognitionRef.current = null;
-      }
-      setLiveCaptionText('');
-    }
-
-    return () => {
-      if (recognitionRef.current) {
-        try { recognitionRef.current.stop(); } catch {}
-      }
-    };
-  }, [autoSubtitlesEnabled, isPlaying]);
-
-  // Load Custom Subtitles (.srt / .vtt)
-  const handleSubtitleUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      let content = event.target?.result;
-      if (file.name.endsWith('.srt')) {
-        content = 'WEBVTT\n\n' + content.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
-      }
-      const blob = new Blob([content], { type: 'text/vtt' });
-      setCustomSubtitleTrack(URL.createObjectURL(blob));
-    };
-    reader.readAsText(file);
-  };
-
   // Keyboard Shortcuts (PotPlayer & YouTube)
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -223,7 +307,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
           togglePiP();
           break;
         case 'c':
-          setAutoSubtitlesEnabled((prev) => !prev);
+          setSubtitlesEnabled((prev) => !prev);
           break;
         case '[':
           changeSpeed(Math.max(0.5, playbackRate - 0.25));
@@ -240,7 +324,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [togglePlay, seekRelative, volume, playbackRate]);
 
-  // Metadata & Safe Progress Resumption
+  // Handle Metadata & Safe Progress Resumption
   const handleLoadedMetadata = () => {
     const video = videoRef.current;
     if (!video) return;
@@ -288,7 +372,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
       onMouseLeave={() => isPlaying && setControlsVisible(false)}
       className="w-full bg-black aspect-video rounded-xl overflow-hidden relative group select-none flex flex-col justify-end shadow-2xl border border-darkBorder"
     >
-      {/* 1. Native Video Element - Plays on demand directly */}
+      {/* 1. Native Video Element */}
       <video
         ref={videoRef}
         playsInline
@@ -311,12 +395,27 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
           setHasError(true);
         }}
       >
-        {customSubtitleTrack && (
-          <track kind="subtitles" src={customSubtitleTrack} srcLang="en" label="Custom Subtitles" default />
+        {subtitleTrackUrl && subtitlesEnabled && (
+          <track kind="subtitles" src={subtitleTrackUrl} srcLang="en" label="English" default />
         )}
       </video>
 
-      {/* 2. Initial Play Button Overlay (YouTube Style) */}
+      {/* 2. Auto-Caption Indicator Badge */}
+      {isAutoGenerating && subtitlesEnabled && (
+        <div className="absolute top-4 left-4 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 border border-primary/30 text-primary text-[11px] font-medium backdrop-blur-sm pointer-events-none">
+          <Sparkles size={12} className="animate-pulse" />
+          <span>Auto Audio Captions (AI)</span>
+        </div>
+      )}
+
+      {/* 3. Live Auto Subtitles Banner (Speech Recognition) */}
+      {subtitlesEnabled && liveCaptionText && isAutoGenerating && (
+        <div className="absolute bottom-20 left-1/2 -translate-x-1/2 max-w-2xl px-4 py-1.5 bg-black/85 text-white text-sm md:text-base font-semibold rounded text-center pointer-events-none z-30 transition-all border border-white/10 shadow-lg">
+          {liveCaptionText}
+        </div>
+      )}
+
+      {/* 4. Center Play Button Overlay */}
       {!hasStarted && !hasError && !buffering && (
         <div
           onClick={togglePlay}
@@ -328,7 +427,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         </div>
       )}
 
-      {/* 3. Subtle Buffering Spinner */}
+      {/* 5. Subtle Buffering Spinner */}
       {buffering && hasStarted && !hasError && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
           <div className="bg-black/60 p-4 rounded-full backdrop-blur-sm">
@@ -337,20 +436,13 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         </div>
       )}
 
-      {/* 4. Live Auto Subtitles Banner */}
-      {autoSubtitlesEnabled && liveCaptionText && (
-        <div className="absolute bottom-20 left-1/2 -translate-x-1/2 max-w-2xl px-4 py-1.5 bg-black/85 text-white text-sm md:text-base font-semibold rounded text-center pointer-events-none z-30 transition-all border border-white/10 shadow-lg">
-          {liveCaptionText}
-        </div>
-      )}
-
-      {/* 5. Error Fallback */}
+      {/* 6. Error Fallback */}
       {hasError && (
         <div className="absolute inset-0 bg-slate-900/95 z-40 flex flex-col items-center justify-center p-6 text-center">
           <AlertCircle className="text-red-400 mb-2" size={36} />
           <h4 className="text-red-300 font-semibold mb-1 text-sm">Media Playback Notice</h4>
           <p className="text-xs text-slate-400 mb-4 max-w-md">
-            If this video is an MKV or high-bitrate container that your browser cannot decode natively, you can open or download it directly:
+            Could not stream video. If encoded as an MKV/AVI container, open directly via the link below:
           </p>
           <div className="flex gap-3">
             <button
@@ -364,7 +456,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
               }}
               className="px-4 py-2 bg-primary hover:bg-sky-400 text-darkBg font-medium text-xs rounded-lg transition-colors"
             >
-              Retry
+              Retry In-Browser
             </button>
             <a
               href={streamUrl}
@@ -379,7 +471,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         </div>
       )}
 
-      {/* 6. Custom Glass Controls */}
+      {/* 7. Custom Controls Bar */}
       <div
         className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent p-4 z-30 transition-opacity duration-300 ${
           controlsVisible || !isPlaying ? 'opacity-100' : 'opacity-0 pointer-events-none'
@@ -438,21 +530,35 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Subtitles Toggle (CC) */}
             <button
-              onClick={() => setAutoSubtitlesEnabled(!autoSubtitlesEnabled)}
-              title="Toggle Auto English Subtitles (C)"
+              onClick={() => setSubtitlesEnabled(!subtitlesEnabled)}
+              title="Toggle Subtitles (C)"
               className={`p-1.5 rounded transition-colors ${
-                autoSubtitlesEnabled ? 'bg-primary text-darkBg font-bold' : 'hover:text-primary text-slate-300'
+                subtitlesEnabled ? 'bg-primary text-darkBg font-bold' : 'hover:text-primary text-slate-300'
               }`}
             >
               <Subtitles size={17} />
             </button>
 
-            <label title="Load external subtitle (.srt / .vtt)" className="cursor-pointer hover:text-primary p-1.5">
+            {/* Upload Custom Subtitle (.srt / .vtt) */}
+            <label title="Upload or Drag & Drop Subtitles (.srt / .vtt)" className="cursor-pointer hover:text-primary p-1.5">
               <Upload size={16} />
               <input type="file" accept=".srt,.vtt" onChange={handleSubtitleUpload} className="hidden" />
             </label>
 
+            {/* Download Generated WebVTT */}
+            {vttContent && (
+              <button
+                onClick={handleDownloadSubtitles}
+                title="Download Generated Subtitles (.vtt)"
+                className="hover:text-primary p-1.5 text-slate-300"
+              >
+                <Download size={16} />
+              </button>
+            )}
+
+            {/* Playback Speed Menu */}
             <div className="relative">
               <button
                 onClick={() => setShowSpeedMenu(!showSpeedMenu)}

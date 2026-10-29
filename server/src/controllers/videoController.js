@@ -81,3 +81,28 @@ export function getVideoStatus(req, res) {
   const status = getVideoDownloadStatus(id);
   res.json(status);
 }
+
+export async function getSubtitles(req, res, next) {
+  try {
+    const video = await Video.findById(req.params.id);
+    if (!video) return res.status(404).json({ error: 'Video not found' });
+    res.json({ subtitles: video.subtitles || null });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function saveSubtitles(req, res, next) {
+  try {
+    const { subtitles } = req.body;
+    const video = await Video.findByIdAndUpdate(
+      req.params.id,
+      { $set: { subtitles, updatedAt: new Date() } },
+      { new: true }
+    );
+    if (!video) return res.status(404).json({ error: 'Video not found' });
+    res.json({ message: 'Subtitles saved successfully', subtitles: video.subtitles });
+  } catch (err) {
+    next(err);
+  }
+}
