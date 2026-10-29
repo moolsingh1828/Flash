@@ -30,11 +30,13 @@ export async function streamVideoFromTelegram(req, res, user) {
   const fileSize = Number(media.size);
   const range = req.headers.range;
 
-  if (!range) {
+if (!range) {
     res.writeHead(200, {
       'Content-Length': fileSize,
       'Content-Type': video.mimeType || 'video/mp4',
-      'Accept-Ranges': 'bytes'
+      'Accept-Ranges': 'bytes',
+      'Access-Control-Allow-Origin': '*',
+      'Cross-Origin-Resource-Policy': 'cross-origin'
     });
     return res.end();
   }
@@ -50,11 +52,13 @@ export async function streamVideoFromTelegram(req, res, user) {
   }
 
   const contentLength = end - start + 1;
-  res.writeHead(206, {
+res.writeHead(206, {
     'Content-Range': `bytes ${start}-${end}/${fileSize}`,
     'Accept-Ranges': 'bytes',
     'Content-Length': contentLength,
-    'Content-Type': video.mimeType || 'video/mp4'
+    'Content-Type': video.mimeType || 'video/mp4',
+    'Access-Control-Allow-Origin': '*',
+    'Cross-Origin-Resource-Policy': 'cross-origin'
   });
 
   try {

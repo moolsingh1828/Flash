@@ -1,5 +1,5 @@
 import React, { useRef, useEffect } from 'react';
-import { api } from '../services/api';
+import { api, API_BASE_URL } from '../services/api';
 
 export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUpdate }) {
   const videoRef = useRef(null);
@@ -8,7 +8,9 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     const video = videoRef.current;
     if (!video) return;
 
-    if (initialPosition > 0) video.currentTime = initialPosition;
+    if (initialPosition > 0) {
+      video.currentTime = initialPosition;
+    }
 
     let lastSent = 0;
     const handleTimeUpdate = () => {
@@ -17,15 +19,20 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         lastSent = current;
         api.put(`/videos/${videoId}/progress`, {
           positionSeconds: current,
-          completed: video.duration ? (current / video.duration) > 0.9 : false
+          completed: video.duration ? current / video.duration > 0.9 : false
         });
         if (onProgressUpdate) onProgressUpdate(current);
       }
     };
 
     video.addEventListener('timeupdate', handleTimeUpdate);
-    return () => video.removeEventListener('timeupdate', handleTimeUpdate);
+    return () => {
+      video.removeEventListener('timeupdate', handleTimeUpdate);
+    };
   }, [videoId, initialPosition, onProgressUpdate]);
+
+  // Clean stream URL using normalized API_BASE_URL
+  const streamUrl = `${API_BASE_URL}/videos/${videoId}/stream`;
 
   return (
     <div className="w-full bg-black aspect-video rounded-xl overflow-hidden relative border border-darkBorder shadow-2xl">
@@ -33,8 +40,9 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         ref={videoRef}
         controls
         playsInline
+        crossOrigin="anonymous"
         className="w-full h-full"
-        src={`${import.meta.env.VITE_API_URL || 'http://localhost:5000/api'}/videos/${videoId}/stream`}
+        src={streamUrl}
       >
         Your browser does not support HTML5 video streaming.
       </video>
