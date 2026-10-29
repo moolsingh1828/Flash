@@ -8,7 +8,6 @@ export async function login(req, res, next) {
     const data = loginSchema.parse(req.body);
     let user = await User.findOne({ email: data.email.toLowerCase() });
 
-    // If no user exists in the entire database at all, auto-create the owner
     const userCount = await User.countDocuments();
     if (userCount === 0) {
       user = await User.create({ email: data.email.toLowerCase(), password: data.password });
@@ -22,11 +21,12 @@ export async function login(req, res, next) {
     }
 
     const token = jwt.sign({ userId: user._id }, ENV.JWT_SECRET, { expiresIn: '7d' });
+    const isProduction = process.env.NODE_ENV === 'production';
 
     res.cookie('token', token, {
       httpOnly: true,
-      secure: ENV.NODE_ENV === 'production',
-      sameSite: 'lax',
+      secure: isProduction,
+      sameSite: isProduction ? 'none' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000
     });
 
@@ -50,11 +50,12 @@ export async function register(req, res, next) {
 
     const user = await User.create({ email: data.email.toLowerCase(), password: data.password });
     const token = jwt.sign({ userId: user._id }, ENV.JWT_SECRET, { expiresIn: '7d' });
+    const isProduction = process.env.NODE_ENV === 'production';
 
     res.cookie('token', token, {
       httpOnly: true,
-      secure: ENV.NODE_ENV === 'production',
-      sameSite: 'lax',
+      secure: isProduction,
+      sameSite: isProduction ? 'none' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000
     });
 
