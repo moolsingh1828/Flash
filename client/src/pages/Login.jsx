@@ -12,20 +12,30 @@ export default function Login() {
   const { refreshUser } = useAuth();
   const navigate = useNavigate();
 
-  async function handleSubmit(e) {
+async function handleSubmit(e) {
     e.preventDefault();
     setLoading(true);
     setError(null);
     try {
+      let res;
       if (isRegistering) {
-        await api.post('/auth/register', { email, password });
+        res = await api.post('/auth/register', { email, password });
       } else {
-        await api.post('/auth/login', { email, password });
+        res = await api.post('/auth/login', { email, password });
       }
+
+      // Save token for cross-domain API calls
+      if (res.data?.token) {
+        localStorage.setItem('token', res.data.token);
+      }
+
       await refreshUser();
       navigate('/');
     } catch (err) {
-      setError(err.response?.data?.error || 'Authentication error occurred');
+      console.error('Login error detail:', err);
+      const serverMessage = err.response?.data?.error;
+      const networkMessage = err.message || 'Cannot reach backend server';
+      setError(serverMessage || `Connection Error: ${networkMessage}`);
     } finally {
       setLoading(false);
     }
