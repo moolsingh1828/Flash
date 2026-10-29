@@ -1,5 +1,5 @@
 import React, { useRef, useEffect } from 'react';
-import { api, API_BASE_URL } from '../services/api';
+import { api } from '../services/api';
 
 export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUpdate }) {
   const videoRef = useRef(null);
@@ -31,8 +31,13 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     };
   }, [videoId, initialPosition, onProgressUpdate]);
 
-  // Clean stream URL using normalized API_BASE_URL
-  const streamUrl = `${API_BASE_URL}/videos/${videoId}/stream`;
+  // Clean URL: Strip any trailing slashes and ensure /api is present without duplicates
+  let rawUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+  rawUrl = rawUrl.trim().replace(/\/+$/, '');
+  if (!rawUrl.endsWith('/api')) {
+    rawUrl = `${rawUrl}/api`;
+  }
+  const streamUrl = `${rawUrl}/videos/${videoId}/stream`;
 
   return (
     <div className="w-full bg-black aspect-video rounded-xl overflow-hidden relative border border-darkBorder shadow-2xl">
