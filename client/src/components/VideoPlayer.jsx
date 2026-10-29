@@ -2,7 +2,7 @@ import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { api } from '../services/api';
 import {
   Play, Pause, Volume2, VolumeX, Maximize, Minimize,
-  RotateCcw, RotateCw, Subtitles, Upload, Settings,
+  RotateCcw, RotateCw, Subtitles, Upload,
   Loader2, AlertCircle, PictureInPicture
 } from 'lucide-react';
 
@@ -11,27 +11,31 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
   const videoRef = useRef(null);
   const recognitionRef = useRef(null);
 
-  // Player State
+  // Download & Stream States
+  const [isReady, setIsReady] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [hasError, setHasError] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+
+  // Player States
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
-  const [buffering, setBuffering] = useState(true);
-  const [hasError, setHasError] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
 
-  // Subtitle States
+  // Subtitles
   const [autoSubtitlesEnabled, setAutoSubtitlesEnabled] = useState(false);
   const [liveCaptionText, setLiveCaptionText] = useState('');
   const [customSubtitleTrack, setCustomSubtitleTrack] = useState(null);
 
   const controlsTimeoutRef = useRef(null);
 
-  // Clean URL formatting
+  // Clean stream URL
   let rawUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
   rawUrl = rawUrl.trim().replace(/\/+$/, '');
   if (!rawUrl.endsWith('/api')) rawUrl = `${rawUrl}/api`;
@@ -39,7 +43,61 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
   const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
   const streamUrl = `${rawUrl}/videos/${videoId}/stream${tokenQuery}`;
 
-  // Auto-hide controls on mouse idle
+  // Poll server download status until video is cached
+  useEffect(() => {
+    let interval = null;
+    let isCancelled = false;
+
+    async function checkStatus() {
+      try {
+        const res = await api.get(`/videos/${videoId}/status`);
+        if (isCancelled) return;
+
+        if (res.data.cached) {
+          setIsReady(true);
+          setDownloadProgress(100);
+          if (interval) clearInterval(interval);
+        } else {
+          // If not cached, trigger stream request in background if not already started
+          setDownloadProgress(res.data.progress || 10);
+        }
+      } catch (err) {
+        console.error('Status check error:', err);
+      }
+    }
+
+    // Initial check
+    checkStatus();
+
+    // Trigger video stream once to start background cache if not already running
+    api.get(`/videos/${videoId}/status`).then((res) => {
+      if (!res.data.cached && !res.data.downloading) {
+        fetch(streamUrl).catch(() => {});
+      }
+    });
+
+    interval = setInterval(async () => {
+      try {
+        const res = await api.get(`/videos/${videoId}/status`);
+        if (isCancelled) return;
+
+        if (res.data.cached) {
+          setIsReady(true);
+          setDownloadProgress(100);
+          clearInterval(interval);
+        } else {
+          setDownloadProgress(res.data.progress || 15);
+        }
+      } catch {}
+    }, 900);
+
+    return () => {
+      isCancelled = true;
+      if (interval) clearInterval(interval);
+    };
+  }, [videoId, streamUrl]);
+
+  // Controls auto-hide
   const handleMouseMove = () => {
     setControlsVisible(true);
     if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
@@ -48,7 +106,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     }, 2800);
   };
 
-  // Play / Pause toggle
   const togglePlay = useCallback(() => {
     if (!videoRef.current) return;
     if (videoRef.current.paused) {
@@ -58,13 +115,11 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     }
   }, []);
 
-  // Seeking
   const seekRelative = useCallback((seconds) => {
     if (!videoRef.current) return;
     videoRef.current.currentTime = Math.max(0, Math.min(videoRef.current.currentTime + seconds, duration));
   }, [duration]);
 
-  // Volume
   const handleVolumeChange = (newVol) => {
     if (!videoRef.current) return;
     const clamped = Math.max(0, Math.min(newVol, 1));
@@ -79,7 +134,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     setIsMuted(!isMuted);
   };
 
-  // Speed
   const changeSpeed = (rate) => {
     if (!videoRef.current) return;
     videoRef.current.playbackRate = rate;
@@ -87,7 +141,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     setShowSpeedMenu(false);
   };
 
-  // Fullscreen
   const toggleFullscreen = () => {
     if (!containerRef.current) return;
     if (!document.fullscreenElement) {
@@ -99,7 +152,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     }
   };
 
-  // Picture in Picture
   const togglePiP = async () => {
     if (!videoRef.current) return;
     if (document.pictureInPictureElement) {
@@ -129,7 +181,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
           setLiveCaptionText(text);
         };
 
-        recognition.onerror = () => {};
         recognition.onend = () => {
           if (autoSubtitlesEnabled && isPlaying) {
             try { recognition.start(); } catch {}
@@ -154,7 +205,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     };
   }, [autoSubtitlesEnabled, isPlaying]);
 
-  // Load Custom External Subtitle file (.srt or .vtt)
+  // External Subtitles (.srt / .vtt)
   const handleSubtitleUpload = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -162,7 +213,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     const reader = new FileReader();
     reader.onload = (event) => {
       let content = event.target?.result;
-      // Convert SRT to WebVTT format if needed
       if (file.name.endsWith('.srt')) {
         content = 'WEBVTT\n\n' + content.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
       }
@@ -172,10 +222,9 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     reader.readAsText(file);
   };
 
-  // PotPlayer & YouTube Keyboard Shortcuts
+  // Keyboard Shortcuts (PotPlayer & YouTube)
   useEffect(() => {
     const handleKeyDown = (e) => {
-      // Don't trigger if typing in an input
       if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
 
       switch (e.key.toLowerCase()) {
@@ -214,10 +263,10 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         case 'c':
           setAutoSubtitlesEnabled((prev) => !prev);
           break;
-        case '[': // PotPlayer slower
+        case '[':
           changeSpeed(Math.max(0.5, playbackRate - 0.25));
           break;
-        case ']': // PotPlayer faster
+        case ']':
           changeSpeed(Math.min(2.0, playbackRate + 0.25));
           break;
         default:
@@ -229,7 +278,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [togglePlay, seekRelative, volume, playbackRate]);
 
-  // Restore Watch Progress
+  // Watch Progress
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -271,64 +320,78 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
       onMouseLeave={() => isPlaying && setControlsVisible(false)}
       className="w-full bg-black aspect-video rounded-xl overflow-hidden relative group select-none flex flex-col justify-end shadow-2xl border border-darkBorder"
     >
-      {/* Native Video Element */}
-      <video
-        ref={videoRef}
-        playsInline
-        autoPlay
-        className="w-full h-full object-contain cursor-pointer"
-        src={streamUrl}
-        onClick={togglePlay}
-        onDoubleClick={toggleFullscreen}
-        onWaiting={() => setBuffering(true)}
-        onCanPlay={() => setBuffering(false)}
-        onPlaying={() => {
-          setIsPlaying(true);
-          setBuffering(false);
-          setHasError(false);
-        }}
-        onPause={() => setIsPlaying(false)}
-        onError={() => {
-          setBuffering(false);
-          setHasError(true);
-        }}
-      >
-        {customSubtitleTrack && (
-          <track kind="subtitles" src={customSubtitleTrack} srcLang="en" label="Custom Subtitles" default />
-        )}
-      </video>
+      {/* 1. Live Telegram Download Progress Overlay */}
+      {!isReady && !hasError && (
+        <div className="absolute inset-0 bg-slate-950 z-30 flex flex-col items-center justify-center p-6 text-center">
+          <Loader2 className="animate-spin text-primary mb-4" size={44} />
+          <h3 className="text-slate-100 text-base font-semibold mb-1">
+            Downloading Media from Telegram...
+          </h3>
+          <p className="text-slate-400 text-xs mb-4 max-w-sm">
+            Transferring via 8 parallel MTProto workers. Takes a few seconds.
+          </p>
+          <div className="w-64 bg-slate-800 rounded-full h-2 overflow-hidden border border-slate-700">
+            <div
+              className="bg-primary h-full transition-all duration-300 ease-out"
+              style={{ width: `${downloadProgress}%` }}
+            />
+          </div>
+          <span className="text-primary font-mono text-xs font-bold mt-2">
+            {downloadProgress}%
+          </span>
+        </div>
+      )}
 
-      {/* Live Auto English Captions Overlay */}
+      {/* 2. Video Player Element (Plays immediately once ready) */}
+      {isReady && (
+        <video
+          ref={videoRef}
+          playsInline
+          autoPlay
+          className="w-full h-full object-contain cursor-pointer"
+          src={streamUrl}
+          onClick={togglePlay}
+          onDoubleClick={toggleFullscreen}
+          onPlaying={() => {
+            setIsPlaying(true);
+            setHasError(false);
+          }}
+          onPause={() => setIsPlaying(false)}
+          onError={(e) => {
+            console.error('Playback error:', e);
+            setHasError(true);
+            setErrorMessage('Browser could not play cached media stream.');
+          }}
+        >
+          {customSubtitleTrack && (
+            <track kind="subtitles" src={customSubtitleTrack} srcLang="en" label="Custom Subtitles" default />
+          )}
+        </video>
+      )}
+
+      {/* 3. Live Auto Subtitles Banner */}
       {autoSubtitlesEnabled && liveCaptionText && (
         <div className="absolute bottom-20 left-1/2 -translate-x-1/2 max-w-2xl px-4 py-1.5 bg-black/85 text-white text-sm md:text-base font-semibold rounded text-center pointer-events-none z-30 transition-all border border-white/10 shadow-lg">
           {liveCaptionText}
         </div>
       )}
 
-      {/* Buffering State */}
-      {buffering && !hasError && (
-        <div className="absolute inset-0 bg-slate-900/60 z-20 flex flex-col items-center justify-center pointer-events-none">
-          <Loader2 className="animate-spin text-primary mb-2" size={42} />
-          <span className="text-xs text-slate-300 font-medium">Streaming from Telegram...</span>
-        </div>
-      )}
-
-      {/* Error Fallback */}
+      {/* 4. Error Fallback */}
       {hasError && (
         <div className="absolute inset-0 bg-slate-900/95 z-40 flex flex-col items-center justify-center p-6 text-center">
           <AlertCircle className="text-red-400 mb-2" size={32} />
           <p className="text-red-300 font-semibold mb-1 text-sm">Media playback error</p>
-          <p className="text-xs text-slate-400 mb-4 max-w-md">Could not read stream from Telegram server.</p>
+          <p className="text-xs text-slate-400 mb-4 max-w-md">{errorMessage || 'Could not stream video.'}</p>
           <div className="flex gap-3">
             <button
               onClick={() => {
                 setHasError(false);
-                setBuffering(true);
-                videoRef.current?.load();
+                setIsReady(false);
+                setDownloadProgress(0);
               }}
               className="px-4 py-2 bg-primary hover:bg-sky-400 text-darkBg font-medium text-xs rounded-lg"
             >
-              Retry
+              Retry Download
             </button>
             <a
               href={streamUrl}
@@ -342,121 +405,116 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         </div>
       )}
 
-      {/* Glassmorphic Controls Bar */}
-      <div
-        className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent p-4 z-30 transition-opacity duration-300 ${
-          controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
-        }`}
-      >
-        {/* Scrubber / Progress Bar */}
-        <div className="relative mb-3 flex items-center group/scrubber cursor-pointer">
-          <input
-            type="range"
-            min={0}
-            max={duration || 100}
-            value={currentTime}
-            onChange={(e) => {
-              const target = Number(e.target.value);
-              videoRef.current.currentTime = target;
-              setCurrentTime(target);
-            }}
-            className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-primary group-hover/scrubber:h-2.5 transition-all"
-          />
-        </div>
-
-        {/* Buttons and Toolbars */}
-        <div className="flex items-center justify-between text-slate-100 text-xs">
-          <div className="flex items-center gap-3">
-            {/* Play/Pause */}
-            <button onClick={togglePlay} className="hover:text-primary transition-colors p-1">
-              {isPlaying ? <Pause size={20} /> : <Play size={20} />}
-            </button>
-
-            {/* Jump -10s / +10s */}
-            <button onClick={() => seekRelative(-10)} title="Rewind 10s (J)" className="hover:text-primary p-1">
-              <RotateCcw size={17} />
-            </button>
-            <button onClick={() => seekRelative(10)} title="Forward 10s (L)" className="hover:text-primary p-1">
-              <RotateCw size={17} />
-            </button>
-
-            {/* Volume Control */}
-            <div className="flex items-center gap-1.5 group/vol">
-              <button onClick={toggleMute} className="hover:text-primary p-1">
-                {isMuted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
-              </button>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={isMuted ? 0 : volume}
-                onChange={(e) => handleVolumeChange(Number(e.target.value))}
-                className="w-16 h-1 bg-white/20 rounded-lg accent-primary"
-              />
-            </div>
-
-            {/* Time Display */}
-            <span className="font-mono text-slate-300 text-[11px] ml-1">
-              {formatTime(currentTime)} / {formatTime(duration)}
-            </span>
+      {/* 5. Custom Controls */}
+      {isReady && (
+        <div
+          className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent p-4 z-30 transition-opacity duration-300 ${
+            controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          }`}
+        >
+          {/* Scrubber */}
+          <div className="relative mb-3 flex items-center group/scrubber cursor-pointer">
+            <input
+              type="range"
+              min={0}
+              max={duration || 100}
+              value={currentTime}
+              onChange={(e) => {
+                const target = Number(e.target.value);
+                if (videoRef.current) {
+                  videoRef.current.currentTime = target;
+                  setCurrentTime(target);
+                }
+              }}
+              className="w-full h-1.5 bg-white/20 rounded-lg appearance-none cursor-pointer accent-primary group-hover/scrubber:h-2.5 transition-all"
+            />
           </div>
 
-          <div className="flex items-center gap-3">
-            {/* Auto English Live Subtitles (CC) */}
-            <button
-              onClick={() => setAutoSubtitlesEnabled(!autoSubtitlesEnabled)}
-              title="Toggle Auto English Subtitles (C)"
-              className={`p-1.5 rounded transition-colors ${
-                autoSubtitlesEnabled ? 'bg-primary text-darkBg font-bold' : 'hover:text-primary text-slate-300'
-              }`}
-            >
-              <Subtitles size={17} />
-            </button>
+          {/* Buttons Toolbar */}
+          <div className="flex items-center justify-between text-slate-100 text-xs">
+            <div className="flex items-center gap-3">
+              <button onClick={togglePlay} className="hover:text-primary transition-colors p-1">
+                {isPlaying ? <Pause size={20} /> : <Play size={20} />}
+              </button>
 
-            {/* PotPlayer: Load External SRT / VTT */}
-            <label title="Load external subtitle (.srt / .vtt)" className="cursor-pointer hover:text-primary p-1.5">
-              <Upload size={16} />
-              <input type="file" accept=".srt,.vtt" onChange={handleSubtitleUpload} className="hidden" />
-            </label>
+              <button onClick={() => seekRelative(-10)} title="Rewind 10s (J)" className="hover:text-primary p-1">
+                <RotateCcw size={17} />
+              </button>
+              <button onClick={() => seekRelative(10)} title="Forward 10s (L)" className="hover:text-primary p-1">
+                <RotateCw size={17} />
+              </button>
 
-            {/* Speed Selector Menu */}
-            <div className="relative">
+              <div className="flex items-center gap-1.5 group/vol">
+                <button onClick={toggleMute} className="hover:text-primary p-1">
+                  {isMuted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
+                </button>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={isMuted ? 0 : volume}
+                  onChange={(e) => handleVolumeChange(Number(e.target.value))}
+                  className="w-16 h-1 bg-white/20 rounded-lg accent-primary"
+                />
+              </div>
+
+              <span className="font-mono text-slate-300 text-[11px] ml-1">
+                {formatTime(currentTime)} / {formatTime(duration)}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-3">
               <button
-                onClick={() => setShowSpeedMenu(!showSpeedMenu)}
-                className="font-medium hover:text-primary px-1.5 py-0.5 rounded border border-white/20 text-[11px]"
+                onClick={() => setAutoSubtitlesEnabled(!autoSubtitlesEnabled)}
+                title="Toggle Auto English Subtitles (C)"
+                className={`p-1.5 rounded transition-colors ${
+                  autoSubtitlesEnabled ? 'bg-primary text-darkBg font-bold' : 'hover:text-primary text-slate-300'
+                }`}
               >
-                {playbackRate}x
+                <Subtitles size={17} />
               </button>
-              {showSpeedMenu && (
-                <div className="absolute bottom-8 right-0 bg-darkCard border border-darkBorder rounded-lg py-1 shadow-2xl z-50 flex flex-col min-w-[70px]">
-                  {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => (
-                    <button
-                      key={rate}
-                      onClick={() => changeSpeed(rate)}
-                      className={`px-3 py-1 text-left text-xs hover:bg-slate-800 ${
-                        playbackRate === rate ? 'text-primary font-bold' : 'text-slate-300'
-                      }`}
-                    >
-                      {rate}x
-                    </button>
-                  ))}
-                </div>
-              )}
+
+              <label title="Load external subtitle (.srt / .vtt)" className="cursor-pointer hover:text-primary p-1.5">
+                <Upload size={16} />
+                <input type="file" accept=".srt,.vtt" onChange={handleSubtitleUpload} className="hidden" />
+              </label>
+
+              <div className="relative">
+                <button
+                  onClick={() => setShowSpeedMenu(!showSpeedMenu)}
+                  className="font-medium hover:text-primary px-1.5 py-0.5 rounded border border-white/20 text-[11px]"
+                >
+                  {playbackRate}x
+                </button>
+                {showSpeedMenu && (
+                  <div className="absolute bottom-8 right-0 bg-darkCard border border-darkBorder rounded-lg py-1 shadow-2xl z-50 flex flex-col min-w-[70px]">
+                    {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => (
+                      <button
+                        key={rate}
+                        onClick={() => changeSpeed(rate)}
+                        className={`px-3 py-1 text-left text-xs hover:bg-slate-800 ${
+                          playbackRate === rate ? 'text-primary font-bold' : 'text-slate-300'
+                        }`}
+                      >
+                        {rate}x
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <button onClick={togglePiP} title="Picture in Picture (P)" className="hover:text-primary p-1">
+                <PictureInPicture size={17} />
+              </button>
+
+              <button onClick={toggleFullscreen} title="Fullscreen (F)" className="hover:text-primary p-1">
+                {isFullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
+              </button>
             </div>
-
-            {/* Picture-in-Picture */}
-            <button onClick={togglePiP} title="Picture in Picture (P)" className="hover:text-primary p-1">
-              <PictureInPicture size={17} />
-            </button>
-
-            {/* Fullscreen */}
-            <button onClick={toggleFullscreen} title="Fullscreen (F)" className="hover:text-primary p-1">
-              {isFullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
-            </button>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

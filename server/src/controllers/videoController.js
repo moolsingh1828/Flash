@@ -2,6 +2,7 @@ import { Video } from '../models/Video.js';
 import { WatchProgress } from '../models/WatchProgress.js';
 import { streamVideoFromTelegram } from '../services/telegram/mediaService.js';
 import { progressUpdateSchema, videoUpdateSchema } from '../validators/schemas.js';
+import { getVideoDownloadStatus } from '../services/telegram/mediaService.js';
 
 export async function getVideos(req, res, next) {
   try {
@@ -73,4 +74,10 @@ export async function getRecentWatched(req, res, next) {
   } catch (err) {
     next(err);
   }
+}
+
+export function getVideoStatus(req, res) {
+  const { id } = req.params;
+  const status = getVideoDownloadStatus(id);
+  res.json(status);
 }
