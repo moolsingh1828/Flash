@@ -19,7 +19,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
-  const [buffering, setBuffering] = useState(true);
+  const [buffering, setBuffering] = useState(false);
   const [hasError, setHasError] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
@@ -288,11 +288,11 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
       onMouseLeave={() => isPlaying && setControlsVisible(false)}
       className="w-full bg-black aspect-video rounded-xl overflow-hidden relative group select-none flex flex-col justify-end shadow-2xl border border-darkBorder"
     >
-      {/* 1. Native Video Element */}
+      {/* 1. Native Video Element - Plays on demand directly */}
       <video
         ref={videoRef}
         playsInline
-        preload="auto"
+        preload="metadata"
         className="w-full h-full object-contain cursor-pointer"
         src={streamUrl}
         onClick={togglePlay}
@@ -316,7 +316,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         )}
       </video>
 
-      {/* 2. Initial Play Button Overlay */}
+      {/* 2. Initial Play Button Overlay (YouTube Style) */}
       {!hasStarted && !hasError && !buffering && (
         <div
           onClick={togglePlay}
@@ -329,10 +329,11 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
       )}
 
       {/* 3. Subtle Buffering Spinner */}
-      {buffering && !hasError && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-20 bg-black/40 backdrop-blur-xs">
-          <Loader2 className="animate-spin text-primary mb-2" size={38} />
-          <span className="text-xs text-slate-300 font-medium">Buffering video from Telegram...</span>
+      {buffering && hasStarted && !hasError && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
+          <div className="bg-black/60 p-4 rounded-full backdrop-blur-sm">
+            <Loader2 className="animate-spin text-primary" size={38} />
+          </div>
         </div>
       )}
 
@@ -343,13 +344,13 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         </div>
       )}
 
-      {/* 5. Error & Non-Native Format Fallback */}
+      {/* 5. Error Fallback */}
       {hasError && (
         <div className="absolute inset-0 bg-slate-900/95 z-40 flex flex-col items-center justify-center p-6 text-center">
           <AlertCircle className="text-red-400 mb-2" size={36} />
           <h4 className="text-red-300 font-semibold mb-1 text-sm">Media Playback Notice</h4>
           <p className="text-xs text-slate-400 mb-4 max-w-md">
-            This video may be transferring, or it was encoded as an MKV/AVI container which browsers cannot decode natively. You can open or download it below:
+            If this video is an MKV or high-bitrate container that your browser cannot decode natively, you can open or download it directly:
           </p>
           <div className="flex gap-3">
             <button
@@ -363,7 +364,7 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
               }}
               className="px-4 py-2 bg-primary hover:bg-sky-400 text-darkBg font-medium text-xs rounded-lg transition-colors"
             >
-              Retry In-Browser
+              Retry
             </button>
             <a
               href={streamUrl}
