@@ -10,7 +10,6 @@ if (!fs.existsSync(CACHE_DIR)) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
 }
 
-// Map of in-progress Telegram downloads to prevent duplicate downloads
 const activeDownloads = new Map();
 
 export function getVideoDownloadStatus(videoId) {
@@ -21,9 +20,6 @@ export function getVideoDownloadStatus(videoId) {
   return { cached: false, downloading: activeDownloads.has(String(videoId)), progress: 0 };
 }
 
-/**
- * Polls disk until at least targetBytes have been written by the background downloader
- */
 async function waitForBytes(filePath, targetBytes, maxWaitMs = 20000) {
   const startTime = Date.now();
   while (Date.now() - startTime < maxWaitMs) {
@@ -36,9 +32,6 @@ async function waitForBytes(filePath, targetBytes, maxWaitMs = 20000) {
   return fs.existsSync(filePath) ? fs.statSync(filePath).size : 0;
 }
 
-/**
- * Serves a fully cached file with standard RFC 7233 Range support
- */
 function serveLocalFile(req, res, filePath, mimeType) {
   const stat = fs.statSync(filePath);
   const fileSize = stat.size;
@@ -99,12 +92,10 @@ export async function streamVideoFromTelegram(req, res, user) {
 
     const cacheFilePath = path.join(CACHE_DIR, `${video._id}.mp4`);
 
-    // 1. FAST PATH: If file is already fully cached, serve instantly from disk!
     if (fs.existsSync(cacheFilePath) && fs.statSync(cacheFilePath).size > 0) {
       return serveLocalFile(req, res, cacheFilePath, video.mimeType);
     }
 
-    // 2. Resolve active Telegram session
     let activeUser = user;
     if (!activeUser || !activeUser.encryptedTelegramSession) {
       activeUser = await User.findOne({ encryptedTelegramSession: { $ne: null } });
@@ -121,7 +112,6 @@ export async function streamVideoFromTelegram(req, res, user) {
       return res.status(503).json({ error: 'Telegram MTProto client is not connected' });
     }
 
-    // 3. Resolve channel entity
     let entity;
     const chatId = video.telegramChatId;
     const numId = chatId.startsWith('-100')
@@ -157,7 +147,6 @@ export async function streamVideoFromTelegram(req, res, user) {
 
     const mimeType = video.mimeType || doc?.mimeType || 'video/mp4';
 
-    // 4. Start high-speed background download to disk if not already running
     const videoKey = String(video._id);
     const tempPath = `${cacheFilePath}.part`;
 
@@ -166,7 +155,7 @@ export async function streamVideoFromTelegram(req, res, user) {
       const downloadPromise = client
         .downloadMedia(message, {
           outputFile: tempPath,
-          workers: 8 // High-speed parallel chunk retrieval
+          workers: 8
         })
         .then(() => {
           if (fs.existsSync(tempPath) && fs.statSync(tempPath).size > 0) {
@@ -177,7 +166,9 @@ export async function streamVideoFromTelegram(req, res, user) {
         .catch((err) => {
           logger.error({ err }, `Error downloading video ${videoKey}`);
           if (fs.existsSync(tempPath)) {
-            try { fs.unlinkSync(tempPath); } catch {}
+            try {
+              fs.unlinkSync(tempPath);
+            } catch {}
           }
         })
         .finally(() => {
@@ -187,8 +178,6 @@ export async function streamVideoFromTelegram(req, res, user) {
       activeDownloads.set(videoKey, downloadPromise);
     }
 
-    // 5. PROGRESSIVE PLAYBACK: Do not wait for 100%!
-    // Wait only for the first 1.5 MB to buffer on disk (takes ~0.5 to 1 second)
     const range = req.headers.range;
     let start = 0;
     let end = fileSize > 0 ? fileSize - 1 : 0;
@@ -199,18 +188,15 @@ export async function streamVideoFromTelegram(req, res, user) {
       if (parts[1]) end = parseInt(parts[1], 10);
     }
 
-    // Wait until the background downloader has written past the requested start point
     const initialBufferTarget = start === 0 ? Math.min(1.5 * 1024 * 1024, fileSize) : start + 64 * 1024;
     await waitForBytes(tempPath, initialBufferTarget, 15000);
 
     const currentBuffered = fs.existsSync(tempPath) ? fs.statSync(tempPath).size : 0;
 
     if (currentBuffered <= start && !fs.existsSync(cacheFilePath)) {
-      // If user jumped far ahead of current buffer, wait for download to catch up
       await waitForBytes(tempPath, start + 512 * 1024, 20000);
     }
 
-    // Stream the growing file directly to the browser
     const streamTarget = fs.existsSync(cacheFilePath) ? cacheFilePath : tempPath;
     const availableSize = fs.existsSync(streamTarget) ? fs.statSync(streamTarget).size : 0;
 

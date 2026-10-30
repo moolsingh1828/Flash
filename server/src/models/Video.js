@@ -15,7 +15,7 @@ const videoSchema = new mongoose.Schema({
   duration: { type: Number, default: 0 },
   order: { type: Number, default: 0 },
   importStatus: { type: String, enum: ['completed', 'failed', 'pending'], default: 'completed' },
-  subtitles: { type: String, default: null }, // Stores generated or uploaded WebVTT text
+  subtitles: { type: String, default: null },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });

@@ -6,19 +6,9 @@ import {
   Loader2, AlertCircle, PictureInPicture, ExternalLink, Sparkles
 } from 'lucide-react';
 
-function formatVttTime(seconds) {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  const ms = Math.floor((seconds % 1) * 1000);
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
-}
-
 export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUpdate }) {
   const containerRef = useRef(null);
   const videoRef = useRef(null);
-  const recognitionRef = useRef(null);
-  const cueStartTimeRef = useRef(0);
 
   // Player States
   const [isPlaying, setIsPlaying] = useState(false);
@@ -36,8 +26,8 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
 
   // Subtitle States
   const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
-  const [isAutoGenerating, setIsAutoGenerating] = useState(false);
-  const [liveCaptionText, setLiveCaptionText] = useState('');
+  const [isGeneratingAI, setIsGeneratingAI] = useState(false);
+  const [hasSubtitles, setHasSubtitles] = useState(false);
   const [vttContent, setVttContent] = useState('');
   const [subtitleTrackUrl, setSubtitleTrackUrl] = useState(null);
 
@@ -51,98 +41,49 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
   const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
   const streamUrl = `${rawUrl}/videos/${videoId}/stream${tokenQuery}`;
 
-  // Check for existing subtitles on mount
-  useEffect(() => {
-    let isCancelled = false;
-
-    async function checkExistingSubtitles() {
-      try {
-        const res = await api.get(`/videos/${videoId}/subtitles`);
-        if (isCancelled) return;
-
-        if (res.data?.subtitles && res.data.subtitles.trim().length > 10) {
-          const blob = new Blob([res.data.subtitles], { type: 'text/vtt' });
-          setSubtitleTrackUrl(URL.createObjectURL(blob));
-          setVttContent(res.data.subtitles);
-          setIsAutoGenerating(false);
-        } else {
-          setIsAutoGenerating(true);
-          setVttContent('WEBVTT - Auto-Generated from Telegram Audio\n\n');
-        }
-      } catch {
-        setIsAutoGenerating(true);
-        setVttContent('WEBVTT - Auto-Generated from Telegram Audio\n\n');
+  // 1. Fetch subtitles from database on mount
+  const loadSubtitlesFromDB = useCallback(async () => {
+    try {
+      const res = await api.get(`/videos/${videoId}/subtitles`);
+      if (res.data?.subtitles && res.data.subtitles.trim().length > 30) {
+        const blob = new Blob([res.data.subtitles], { type: 'text/vtt' });
+        setSubtitleTrackUrl(URL.createObjectURL(blob));
+        setVttContent(res.data.subtitles);
+        setHasSubtitles(true);
+        setSubtitlesEnabled(true);
+      } else {
+        setHasSubtitles(false);
       }
+    } catch {
+      setHasSubtitles(false);
     }
-
-    checkExistingSubtitles();
-    return () => { isCancelled = true; };
   }, [videoId]);
 
-  // Live Speech Recognition Subtitle Generator
   useEffect(() => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition || !isAutoGenerating) return;
+    loadSubtitlesFromDB();
+  }, [loadSubtitlesFromDB]);
 
-    if (isPlaying && subtitlesEnabled) {
-      try {
-        const recognition = new SpeechRecognition();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.lang = 'en-US';
-
-        recognition.onstart = () => {
-          cueStartTimeRef.current = videoRef.current ? videoRef.current.currentTime : 0;
-        };
-
-        recognition.onresult = (event) => {
-          let interimText = '';
-          for (let i = event.resultIndex; i < event.results.length; ++i) {
-            const transcript = event.results[i][0].transcript;
-            if (event.results[i].isFinal) {
-              const startSec = cueStartTimeRef.current;
-              const endSec = videoRef.current ? videoRef.current.currentTime : startSec + 2.5;
-              const newCue = `${formatVttTime(startSec)} --> ${formatVttTime(Math.max(endSec, startSec + 1))}\n${transcript.trim()}\n\n`;
-
-              setVttContent((prev) => {
-                const updated = prev + newCue;
-                api.put(`/videos/${videoId}/subtitles`, { subtitles: updated }).catch(() => {});
-                return updated;
-              });
-
-              cueStartTimeRef.current = videoRef.current ? videoRef.current.currentTime : 0;
-              setLiveCaptionText(transcript.trim());
-            } else {
-              interimText += transcript;
-            }
-          }
-          if (interimText) setLiveCaptionText(interimText);
-        };
-
-        recognition.onend = () => {
-          if (isPlaying && isAutoGenerating && subtitlesEnabled) {
-            try { recognition.start(); } catch {}
-          }
-        };
-
-        recognition.start();
-        recognitionRef.current = recognition;
-      } catch {}
-    } else {
-      if (recognitionRef.current) {
-        try { recognitionRef.current.stop(); } catch {}
-        recognitionRef.current = null;
+  // 2. Trigger Groq Whisper AI Subtitle Generation (~2 seconds)
+  const handleGenerateAISubtitles = async () => {
+    if (isGeneratingAI) return;
+    setIsGeneratingAI(true);
+    try {
+      const res = await api.post(`/videos/${videoId}/generate-subtitles`);
+      if (res.data?.subtitles) {
+        const blob = new Blob([res.data.subtitles], { type: 'text/vtt' });
+        setSubtitleTrackUrl(URL.createObjectURL(blob));
+        setVttContent(res.data.subtitles);
+        setHasSubtitles(true);
+        setSubtitlesEnabled(true);
       }
-      setLiveCaptionText('');
+    } catch (err) {
+      alert(err.response?.data?.error || 'Failed generating subtitles with Groq AI');
+    } finally {
+      setIsGeneratingAI(false);
     }
+  };
 
-    return () => {
-      if (recognitionRef.current) {
-        try { recognitionRef.current.stop(); } catch {}
-      }
-    };
-  }, [isAutoGenerating, isPlaying, subtitlesEnabled, videoId]);
-
+  // 3. Upload Custom Subtitles (.srt / .vtt)
   const handleSubtitleUpload = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -158,19 +99,20 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
       const blob = new Blob([content], { type: 'text/vtt' });
       setSubtitleTrackUrl(URL.createObjectURL(blob));
       setVttContent(content);
-      setIsAutoGenerating(false);
-      setLiveCaptionText('');
+      setHasSubtitles(true);
+      setSubtitlesEnabled(true);
     };
     reader.readAsText(file);
   };
 
+  // 4. Download Subtitles (.vtt file)
   const handleDownloadSubtitles = () => {
     if (!vttContent) return;
     const blob = new Blob([vttContent], { type: 'text/vtt' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `lesson_${videoId}_subtitles.vtt`;
+    a.download = `subtitles_${videoId}.vtt`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -255,7 +197,6 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
     }
   };
 
-  // Keyboard Shortcuts (PotPlayer & YouTube)
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
@@ -385,18 +326,26 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
         )}
       </video>
 
-      {/* Auto-Caption Badge */}
-      {isAutoGenerating && subtitlesEnabled && (
-        <div className="absolute top-4 left-4 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 border border-primary/30 text-primary text-[11px] font-medium backdrop-blur-sm pointer-events-none">
-          <Sparkles size={12} className="animate-pulse" />
-          <span>Auto Audio Captions (AI)</span>
-        </div>
-      )}
-
-      {/* Live Auto Subtitles Banner */}
-      {subtitlesEnabled && liveCaptionText && isAutoGenerating && (
-        <div className="absolute bottom-20 left-1/2 -translate-x-1/2 max-w-2xl px-4 py-1.5 bg-black/85 text-white text-sm md:text-base font-semibold rounded text-center pointer-events-none z-30 transition-all border border-white/10 shadow-lg">
-          {liveCaptionText}
+      {/* Button: Generate AI Subtitles if none exist */}
+      {!hasSubtitles && !hasError && (
+        <div className="absolute top-4 left-4 z-20 flex items-center gap-2">
+          <button
+            onClick={handleGenerateAISubtitles}
+            disabled={isGeneratingAI}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-primary/20 hover:bg-primary/30 border border-primary/40 text-primary text-xs font-semibold backdrop-blur-md shadow-lg transition-all"
+          >
+            {isGeneratingAI ? (
+              <>
+                <Loader2 size={13} className="animate-spin" />
+                <span>Transcribing with Groq AI (~2s)...</span>
+              </>
+            ) : (
+              <>
+                <Sparkles size={13} />
+                <span>Generate Auto Subtitles (AI)</span>
+              </>
+            )}
+          </button>
         </div>
       )}
 
@@ -513,31 +462,37 @@ export default function VideoPlayer({ videoId, initialPosition = 0, onProgressUp
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Subtitles Toggle (CC) */}
             <button
               onClick={() => setSubtitlesEnabled(!subtitlesEnabled)}
               title="Toggle Subtitles (C)"
               className={`p-1.5 rounded transition-colors ${
-                subtitlesEnabled ? 'bg-primary text-darkBg font-bold' : 'hover:text-primary text-slate-300'
+                subtitlesEnabled && hasSubtitles
+                  ? 'bg-primary text-darkBg font-bold'
+                  : 'hover:text-primary text-slate-300'
               }`}
             >
               <Subtitles size={17} />
             </button>
 
+            {/* Upload Custom Subtitles (.srt / .vtt) */}
             <label title="Upload or Drag & Drop Subtitles (.srt / .vtt)" className="cursor-pointer hover:text-primary p-1.5">
               <Upload size={16} />
               <input type="file" accept=".srt,.vtt" onChange={handleSubtitleUpload} className="hidden" />
             </label>
 
-            {vttContent && (
+            {/* Download Generated Subtitles (.vtt) */}
+            {hasSubtitles && (
               <button
                 onClick={handleDownloadSubtitles}
-                title="Download Generated Subtitles (.vtt)"
+                title="Download Subtitles (.vtt)"
                 className="hover:text-primary p-1.5 text-slate-300"
               >
                 <Download size={16} />
               </button>
             )}
 
+            {/* Playback Speed Menu */}
             <div className="relative">
               <button
                 onClick={() => setShowSpeedMenu(!showSpeedMenu)}
